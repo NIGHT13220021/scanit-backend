@@ -10,8 +10,8 @@ const sendFast2SMS = async (phone, otp) => {
   const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
     params: {
       authorization: process.env.FAST2SMS_API_KEY,
-      route: 'otp',
-      variables_values: otp,
+      route: 'q',
+      message: `Your ScanIt OTP is ${otp}. Valid for 10 minutes. Do not share with anyone.`,
       flash: 0,
       numbers: phone,
     },
@@ -82,12 +82,14 @@ router.post('/verify-otp', async (req, res) => {
     );
 
     let user = await db.query(
-      'SELECT * FROM users WHERE phone = $1', [phone]
+      'SELECT * FROM users WHERE phone = $1',
+      [phone]
     );
 
     if (user.rows.length === 0) {
       user = await db.query(
-        'INSERT INTO users (phone) VALUES ($1) RETURNING *', [phone]
+        'INSERT INTO users (phone) VALUES ($1) RETURNING *',
+        [phone]
       );
     }
 
@@ -97,7 +99,11 @@ router.post('/verify-otp', async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
-    res.json({ success: true, token, user: user.rows[0] });
+    res.json({
+      success: true,
+      token,
+      user: user.rows[0]
+    });
 
   } catch (error) {
     console.error('Verify OTP error:', error);
