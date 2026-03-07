@@ -6,18 +6,11 @@ const axios = require('axios');
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-const sendFast2SMS = async (phone, otp) => {
-  const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
-    params: {
-      authorization: process.env.FAST2SMS_API_KEY,
-      route: 'q',
-      message: `Your ScanIt OTP is ${otp}. Valid for 10 minutes. Do not share with anyone.`,
-      flash: 0,
-      numbers: phone,
-    },
-    headers: { 'cache-control': 'no-cache' }
-  });
-  console.log('Fast2SMS response:', response.data);
+const send2FactorOTP = async (phone, otp) => {
+  const response = await axios.get(
+    `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${phone}/${otp}/ScanIt OTP`
+  );
+  console.log('2Factor response:', response.data);
   return response.data;
 };
 
@@ -39,12 +32,12 @@ router.post('/send-otp', async (req, res) => {
 
     let smsSent = false;
     try {
-      await sendFast2SMS(phone, otp);
+      await send2FactorOTP(phone, otp);
       smsSent = true;
-      console.log(`✅ OTP sent via SMS to ${phone}`);
+      console.log(`✅ OTP sent via 2Factor to ${phone}`);
     } catch (smsError) {
       console.log(`⚠️ SMS failed: ${smsError.message}`);
-      console.log(`⚠️ SMS error details: ${JSON.stringify(smsError.response?.data)}`);
+      console.log(`⚠️ Details: ${JSON.stringify(smsError.response?.data)}`);
       console.log(`📱 DEV OTP for ${phone}: ${otp}`);
     }
 
