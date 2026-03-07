@@ -8,8 +8,8 @@ const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString()
 
 const send2FactorOTP = async (phone, otp) => {
   const response = await axios.get(
-    `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${phone}/${otp}/ScanIt OTP`
-  );
+  `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${phone}/${otp}/AUTOGEN`
+);
   console.log('2Factor response:', response.data);
   return response.data;
 };
