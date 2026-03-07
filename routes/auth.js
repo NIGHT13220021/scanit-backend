@@ -15,9 +15,7 @@ const sendFast2SMS = async (phone, otp) => {
       flash: 0,
       numbers: phone,
     },
-    headers: {
-      'cache-control': 'no-cache'
-    }
+    headers: { 'cache-control': 'no-cache' }
   });
   console.log('Fast2SMS response:', response.data);
   return response.data;
@@ -35,7 +33,7 @@ router.post('/send-otp', async (req, res) => {
     await db.query(
       `INSERT INTO otps (phone, otp, expires_at)
        VALUES ($1, $2, $3)
-       ON CONFLICT (phone) DO UPDATE SET otp=$2, expires_at=$3, verified=false`,
+       ON CONFLICT (phone) DO UPDATE SET otp=$2, expires_at=$3, is_used=false`,
       [phone, otp, expires]
     );
 
@@ -70,7 +68,7 @@ router.post('/verify-otp', async (req, res) => {
     const result = await db.query(
       `SELECT * FROM otps 
        WHERE phone = $1 AND otp = $2 
-       AND expires_at > NOW() AND verified = false`,
+       AND expires_at > NOW() AND is_used = false`,
       [phone, otp]
     );
 
@@ -79,19 +77,17 @@ router.post('/verify-otp', async (req, res) => {
     }
 
     await db.query(
-      'UPDATE otps SET verified = true WHERE phone = $1',
+      'UPDATE otps SET is_used = true WHERE phone = $1',
       [phone]
     );
 
     let user = await db.query(
-      'SELECT * FROM users WHERE phone = $1',
-      [phone]
+      'SELECT * FROM users WHERE phone = $1', [phone]
     );
 
     if (user.rows.length === 0) {
       user = await db.query(
-        'INSERT INTO users (phone) VALUES ($1) RETURNING *',
-        [phone]
+        'INSERT INTO users (phone) VALUES ($1) RETURNING *', [phone]
       );
     }
 
@@ -101,11 +97,7 @@ router.post('/verify-otp', async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
-    res.json({
-      success: true,
-      token,
-      user: user.rows[0]
-    });
+    res.json({ success: true, token, user: user.rows[0] });
 
   } catch (error) {
     console.error('Verify OTP error:', error);
