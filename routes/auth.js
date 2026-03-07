@@ -44,6 +44,7 @@ router.post('/send-otp', async (req, res) => {
       console.log(`✅ OTP sent via SMS to ${phone}`);
     } catch (smsError) {
       console.log(`⚠️ SMS failed: ${smsError.message}`);
+      console.log(`⚠️ SMS error details: ${JSON.stringify(smsError.response?.data)}`);
       console.log(`📱 DEV OTP for ${phone}: ${otp}`);
     }
 
@@ -99,11 +100,7 @@ router.post('/verify-otp', async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
-    res.json({
-      success: true,
-      token,
-      user: user.rows[0]
-    });
+    res.json({ success: true, token, user: user.rows[0] });
 
   } catch (error) {
     console.error('Verify OTP error:', error);
