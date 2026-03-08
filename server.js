@@ -23,3 +23,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ ScanIt Backend running on port ${PORT}`);
   console.log(`🌐 http://localhost:${PORT}/health\n`);
 });
+setInterval(async () => {
+  try {
+    const http = require('http');
+    http.get('http://localhost:' + PORT + '/health', () => {});
+    console.log('🏓 Self ping to stay awake');
+  } catch(e) {}
+}, 14 * 60 * 1000);
