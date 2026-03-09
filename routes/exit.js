@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const { authenticate } = require('../middleware/auth');
 
-// ✅ NEW — frontend calls this to get the exit QR code
+// ✅ GET exit code for session
 router.get('/code/:sessionId', authenticate, async (req, res) => {
   const { sessionId } = req.params;
   try {
@@ -26,10 +27,52 @@ router.get('/code/:sessionId', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Payment not completed' });
     }
 
-    res.json({ exit_code: order.exit_qr_code });
+    res.json({
+      exit_code: order.exit_qr_code,
+      exit_qr_expires: order.exit_qr_expires, // ✅ send expiry to frontend
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Could not fetch exit code' });
+  }
+});
+
+// ✅ NEW — regenerate a fresh exit QR if expired
+router.post('/regenerate/:sessionId', authenticate, async (req, res) => {
+  const { sessionId } = req.params;
+  try {
+    // verify payment is paid
+    const check = await db.query(
+      `SELECT id, payment_status FROM orders 
+       WHERE session_id = $1 
+       ORDER BY created_at DESC LIMIT 1`,
+      [sessionId]
+    );
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: 'No order found' });
+    }
+
+    if (check.rows[0].payment_status !== 'paid') {
+      return res.status(400).json({ error: 'Payment not completed' });
+    }
+
+    const orderId = check.rows[0].id;
+    const newExitCode = uuidv4();
+    const newExpiry = new Date(Date.now() + 30 * 60 * 1000); // fresh 30 mins
+
+    await db.query(
+      `UPDATE orders SET exit_qr_code = $1, exit_qr_expires = $2 WHERE id = $3`,
+      [newExitCode, newExpiry, orderId]
+    );
+
+    res.json({
+      exit_code: newExitCode,
+      exit_qr_expires: newExpiry,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Could not regenerate exit QR' });
   }
 });
 
