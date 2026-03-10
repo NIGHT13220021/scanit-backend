@@ -107,4 +107,53 @@ router.get('/history/all', authenticate, async (req, res) => {
   }
 });
 
+
+
+// ✅ ADD THIS ROUTE to your routes/order.js file
+// GET /api/order/history — returns all past orders for logged-in user
+
+router.get('/history', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const result = await db.query(
+      `SELECT 
+        o.id,
+        o.order_number,
+        o.total,
+        o.subtotal,
+        o.payment_status,
+        o.razorpay_payment_id,
+        o.created_at,
+        s.name as store_name,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'name', p.name,
+              'brand', p.brand,
+              'quantity', ci.quantity,
+              'price', ci.price,
+              'item_total', ci.quantity * ci.price
+            )
+          ) FILTER (WHERE p.id IS NOT NULL),
+          '[]'
+        ) as items
+      FROM orders o
+      LEFT JOIN stores s ON s.id = o.store_id
+      LEFT JOIN sessions ses ON ses.id = o.session_id
+      LEFT JOIN cart_items ci ON ci.session_id = o.session_id
+      LEFT JOIN products p ON p.id = ci.product_id
+      WHERE o.user_id = $1
+      GROUP BY o.id, s.name
+      ORDER BY o.created_at DESC`,
+      [userId]
+    );
+
+    res.json({ orders: result.rows });
+  } catch (error) {
+    console.error('Order history error:', error);
+    res.status(500).json({ error: 'Could not fetch order history' });
+  }
+});
+
 module.exports = router;
