@@ -170,7 +170,7 @@ router.get('/stats', authAdmin, async (req, res) => {
       .eq('store_id', store_id)
       .gte('created_at', todayStart.toISOString());
 
-    const todayRevenue  = todayOrders?.reduce((s, o) => s + (o.total_amount || 0), 0) || 0;
+    const todayRevenue = todayOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0
     const monthRevenue  = monthOrders?.reduce((s, o) => s + (o.total_amount || 0), 0) || 0;
 
     return res.json({
@@ -213,7 +213,7 @@ router.get('/orders', authAdmin, async (req, res) => {
     }
 
     if (status && status !== 'all') {
-      query = query.eq('status', status);
+      query = query.eq('payment_status', status);
     }
 
     const { data: orders, error } = await query;
@@ -534,7 +534,7 @@ router.get('/analytics', authAdmin, async (req, res) => {
       .from('orders')
       .select('total_amount, created_at')
       .eq('store_id', store_id)
-      .eq('status', 'paid')
+      .eq('payment_status', 'paid')
       .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
 
     // Group by day
@@ -768,7 +768,7 @@ router.get('/superadmin/stats', authSuperAdmin, async (req, res) => {
     const { data: revenue } = await supabase
       .from('orders')
       .select('total_amount')
-      .eq('status', 'paid');
+      .eq('payment_status', 'paid');
 
     const totalRevenue = (revenue || []).reduce((s, o) => s + (o.total_amount || 0), 0);
 
