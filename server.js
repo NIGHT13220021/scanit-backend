@@ -14,6 +14,7 @@ app.use('/api/product', require('./routes/product'));
 app.use('/api/cart',    require('./routes/cart'));
 app.use('/api/order',   require('./routes/order'));
 app.use('/api/exit',    require('./routes/exit'));
+app.use('/api/admin',   require('./routes/admin'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', message: 'ScanIt API running', time: new Date() });
