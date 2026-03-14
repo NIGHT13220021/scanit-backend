@@ -87,11 +87,23 @@ router.post('/login', async (req, res) => {
       store = storeData;
     }
 
-    const token = jwt.sign(
-      { id: user.id, phone: user.phone, role: user.role, store_id: user.store_id || null },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
+    // Re-fetch fresh user to always get latest store_id
+const { data: freshUser } = await supabase
+  .from('users')
+  .select('id, phone, role, store_id')
+  .eq('id', user.id)
+  .single();
+
+const token = jwt.sign(
+  {
+    id:       freshUser.id,
+    phone:    freshUser.phone,
+    role:     freshUser.role,
+    store_id: freshUser.store_id || null,
+  },
+  process.env.JWT_SECRET,
+  { expiresIn: '7d' }
+);
 
     return res.json({ success: true, token, role: user.role, phone: user.phone, store });
 
