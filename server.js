@@ -1,8 +1,8 @@
 const express = require('express');
-const cors = require('cors');
+const cors    = require('cors');
 require('dotenv').config();
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
@@ -20,14 +20,18 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', message: 'ScanIt API running', time: new Date() });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✅ ScanIt Backend running on port ${PORT}`);
-  console.log(`🌐 http://localhost:${PORT}/health\n`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ ScanIt Backend running on port ${PORT}`);
+  console.log(`🌐 http://localhost:${PORT}/health`);
 });
-setInterval(async () => {
-  try {
+
+// Keep-alive ping — only run after server is confirmed listening
+server.on('listening', () => {
+  setInterval(() => {
     const http = require('http');
-    http.get('http://localhost:' + PORT + '/health', () => {});
-    console.log('🏓 Self ping to stay awake');
-  } catch(e) {}
-}, 14 * 60 * 1000);
+    const req  = http.get(`http://127.0.0.1:${PORT}/health`, (res) => {
+      console.log('🏓 Self ping to stay awake');
+    });
+    req.on('error', () => {}); // silently ignore errors
+  }, 14 * 60 * 1000);
+});
