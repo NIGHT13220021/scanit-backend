@@ -252,7 +252,6 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch live sessions.' });
   }
 });
-
 // ════════════════════════════════════════════════════════
 // PRODUCTS
 // ════════════════════════════════════════════════════════
@@ -264,22 +263,30 @@ router.get('/products', authAdmin, async (req, res) => {
 
     const { data: products, error } = await supabase
       .from('store_products')
-      .select('id, price, stock_quantity, is_available, products(id, name, barcode, brand, category)')
+      .select(`
+        id,
+        price,
+        mrp,
+        gst_percent,
+        in_stock,
+        products(id, name, barcode, brand, category)
+      `)
       .eq('store_id', store_id)
-      .order('created_at', { ascending: false });
+      .order('updated_at', { ascending: false });
 
     if (error) throw error;
 
     const flat = (products || []).map(sp => ({
       store_product_id: sp.id,
-      product_id:       sp.products?.id,
-      name:             sp.products?.name,
-      barcode:          sp.products?.barcode,
-      brand:            sp.products?.brand,
-      category:         sp.products?.category,
-      price:            sp.price,
-      stock:            sp.stock_quantity,
-      available:        sp.is_available,
+      product_id: sp.products?.id,
+      name: sp.products?.name,
+      barcode: sp.products?.barcode,
+      brand: sp.products?.brand,
+      category: sp.products?.category,
+      price: sp.price,
+      mrp: sp.mrp,
+      gst_percent: sp.gst_percent,
+      in_stock: sp.in_stock
     }));
 
     return res.json({ success: true, products: flat });
@@ -290,34 +297,55 @@ router.get('/products', authAdmin, async (req, res) => {
   }
 });
 
+
 // POST /api/admin/products
 router.post('/products', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
-    const { barcode, name, brand, category, price, stock, available = true } = req.body;
+
+    let { barcode, name, brand, category, price } = req.body;
 
     if (!barcode || !name || !price) {
       return res.status(400).json({ error: 'Barcode, name and price are required.' });
     }
 
+    // Clean price if ₹ present
+    price = parseFloat(String(price).replace(/[^\d.]/g, ''));
+
     const { data: product, error: prodError } = await supabase
       .from('products')
-      .upsert({ barcode, name, brand, category }, { onConflict: 'barcode' })
-      .select().single();
+      .upsert(
+        { barcode, name, brand, category },
+        { onConflict: 'barcode' }
+      )
+      .select()
+      .single();
 
     if (prodError) throw prodError;
 
     const { data: storeProduct, error: spError } = await supabase
       .from('store_products')
-      .upsert({
-        store_id, product_id: product.id,
-        price: parseFloat(price), stock_quantity: parseInt(stock) || 0, is_available: available,
-      }, { onConflict: 'store_id,product_id' })
-      .select().single();
+      .upsert(
+        {
+          store_id,
+          product_id: product.id,
+          price: price,
+          mrp: price,
+          gst_percent: 0,
+          in_stock: true
+        },
+        { onConflict: 'store_id,product_id' }
+      )
+      .select()
+      .single();
 
     if (spError) throw spError;
 
-    return res.json({ success: true, message: 'Product added successfully.', product: { ...product, ...storeProduct } });
+    return res.json({
+      success: true,
+      message: 'Product added successfully.',
+      product: { ...product, ...storeProduct }
+    });
 
   } catch (error) {
     console.error('Add product error:', error.message);
@@ -325,35 +353,57 @@ router.post('/products', authAdmin, async (req, res) => {
   }
 });
 
+
 // PUT /api/admin/products/:id
 router.put('/products/:id', authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const store_id = req.user.store_id;
-    const { name, brand, category, price, stock, available } = req.body;
+
+    let { name, brand, category, price, mrp, gst_percent, in_stock } = req.body;
+
+    price = parseFloat(String(price).replace(/[^\d.]/g, ''));
+    mrp = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
 
     const { error } = await supabase
       .from('store_products')
-      .update({ price: parseFloat(price), stock_quantity: parseInt(stock), is_available: available })
-      .eq('id', id).eq('store_id', store_id);
+      .update({
+        price,
+        mrp,
+        gst_percent: parseFloat(gst_percent) || 0,
+        in_stock
+      })
+      .eq('id', id)
+      .eq('store_id', store_id);
 
     if (error) throw error;
 
     if (name || brand || category) {
       const { data: sp } = await supabase
-        .from('store_products').select('product_id').eq('id', id).single();
+        .from('store_products')
+        .select('product_id')
+        .eq('id', id)
+        .single();
+
       if (sp) {
-        await supabase.from('products').update({ name, brand, category }).eq('id', sp.product_id);
+        await supabase
+          .from('products')
+          .update({ name, brand, category })
+          .eq('id', sp.product_id);
       }
     }
 
-    return res.json({ success: true, message: 'Product updated.' });
+    return res.json({
+      success: true,
+      message: 'Product updated.'
+    });
 
   } catch (error) {
     console.error('Update product error:', error.message);
     return res.status(500).json({ error: 'Failed to update product.' });
   }
 });
+
 
 // DELETE /api/admin/products/:id
 router.delete('/products/:id', authAdmin, async (req, res) => {
@@ -362,10 +412,17 @@ router.delete('/products/:id', authAdmin, async (req, res) => {
     const store_id = req.user.store_id;
 
     const { error } = await supabase
-      .from('store_products').delete().eq('id', id).eq('store_id', store_id);
+      .from('store_products')
+      .delete()
+      .eq('id', id)
+      .eq('store_id', store_id);
 
     if (error) throw error;
-    return res.json({ success: true, message: 'Product removed from store.' });
+
+    return res.json({
+      success: true,
+      message: 'Product removed from store.'
+    });
 
   } catch (error) {
     console.error('Delete product error:', error.message);
