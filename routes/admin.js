@@ -6,8 +6,7 @@ const QRCode     = require('qrcode');
 const bcrypt     = require('bcryptjs');
 require('dotenv').config();
 
-// node-fetch (dynamic import for ESM compat)
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+const axios = require('axios');
 
 // In-memory OTP store  →  phone: { otp, expiresAt, userId, verified }
 // Fine for single-server. Swap with Redis for multi-instance deployments.
@@ -141,14 +140,14 @@ router.post('/forgot-password', async (req, res) => {
 
     otpStore.set(phone, { otp, expiresAt, userId: user.id, verified: false });
 
-    // 2Factor SMS  —  template name: NIVO_OTP  (create it in your 2Factor dashboard)
-    const apiKey = process.env.TWOFACTOR_API_KEY;
-    const smsUrl = `https://2factor.in/API/V1/${apiKey}/SMS/${phone}/${otp}/NIVO_OTP`;
-    const smsRes  = await fetch(smsUrl);
-    const smsData = await smsRes.json();
+    // 2Factor VOICE OTP — calls the phone and reads the OTP aloud
+    const apiKey  = process.env.TWOFACTOR_API_KEY;
+    const smsUrl  = `https://2factor.in/API/V1/${apiKey}/VOICE/${phone}/${otp}`;
+    const smsRes  = await axios.get(smsUrl);
+    const smsData = smsRes.data;
 
     if (smsData.Status !== 'Success') {
-      console.error('2Factor SMS error:', smsData);
+      console.error('2Factor VOICE OTP error:', smsData);
       return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
     }
 
