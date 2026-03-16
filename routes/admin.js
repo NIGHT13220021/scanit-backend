@@ -682,4 +682,164 @@ router.put('/superadmin/stores/:id/billing', authSuperAdmin, async (req, res) =>
   }
 });
 
+
+// ════════════════════════════════════════════════════════
+// CSV EXPORT ROUTES
+// Add these 3 routes to your admin.js before module.exports
+// ════════════════════════════════════════════════════════
+
+// Helper — convert array of objects to CSV string
+function toCSV(rows, columns) {
+  if (!rows || rows.length === 0) return columns.join(',') + '\n';
+  const header = columns.join(',');
+  const body = rows.map(row =>
+    columns.map(col => {
+      const val = row[col] === null || row[col] === undefined ? '' : String(row[col]);
+      // Wrap in quotes if contains comma, quote or newline
+      return val.includes(',') || val.includes('"') || val.includes('\n')
+        ? `"${val.replace(/"/g, '""')}"`
+        : val;
+    }).join(',')
+  ).join('\n');
+  return header + '\n' + body;
+}
+
+// ── GET /api/admin/export/orders ─────────────────────────
+// Downloads all orders as CSV
+router.get('/export/orders', authAdmin, async (req, res) => {
+  try {
+    const store_id = req.user.store_id;
+    const { from, to, status } = req.query;
+
+    let query = supabase
+      .from('orders')
+      .select('id, total, payment_status, razorpay_payment_id, created_at, users(phone)')
+      .order('created_at', { ascending: false });
+
+    if (req.user.role === 'store_owner') query = query.eq('store_id', store_id);
+    if (status && status !== 'all')      query = query.eq('payment_status', status);
+    if (from)  query = query.gte('created_at', new Date(from).toISOString());
+    if (to)    query = query.lte('created_at', new Date(to).toISOString());
+
+    const { data: orders, error } = await query;
+    if (error) throw error;
+
+    // Flatten for CSV
+    const rows = (orders || []).map(o => ({
+      order_id:           o.id,
+      customer_phone:     o.users?.phone || '—',
+      amount:             o.total || 0,
+      status:             o.payment_status,
+      payment_id:         o.razorpay_payment_id || '—',
+      date:               new Date(o.created_at).toLocaleDateString('en-IN', {
+                            day: '2-digit', month: 'short', year: 'numeric',
+                            hour: '2-digit', minute: '2-digit'
+                          }),
+    }));
+
+    const columns = ['order_id', 'customer_phone', 'amount', 'status', 'payment_id', 'date'];
+    const csv = toCSV(rows, columns);
+
+    const filename = `orders_${new Date().toISOString().slice(0,10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(csv);
+
+  } catch (error) {
+    console.error('Export orders error:', error.message);
+    return res.status(500).json({ error: 'Failed to export orders.' });
+  }
+});
+
+// ── GET /api/admin/export/products ───────────────────────
+// Downloads all store products as CSV
+router.get('/export/products', authAdmin, async (req, res) => {
+  try {
+    const { data: products, error } = await supabase
+      .from('store_products')
+      .select('id, price, mrp, gst_percent, in_stock, products(name, barcode, brand, category)')
+      .eq('store_id', req.user.store_id)
+      .order('updated_at', { ascending: false });
+
+    if (error) throw error;
+
+    const rows = (products || []).map(sp => ({
+      barcode:     sp.products?.barcode || '—',
+      name:        sp.products?.name    || '—',
+      brand:       sp.products?.brand   || '—',
+      category:    sp.products?.category || '—',
+      price:       sp.price    || 0,
+      mrp:         sp.mrp      || 0,
+      gst_percent: sp.gst_percent || 0,
+      in_stock:    sp.in_stock ? 'Yes' : 'No',
+    }));
+
+    const columns = ['barcode', 'name', 'brand', 'category', 'price', 'mrp', 'gst_percent', 'in_stock'];
+    const csv = toCSV(rows, columns);
+
+    const filename = `products_${new Date().toISOString().slice(0,10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(csv);
+
+  } catch (error) {
+    console.error('Export products error:', error.message);
+    return res.status(500).json({ error: 'Failed to export products.' });
+  }
+});
+
+// ── GET /api/admin/export/revenue ────────────────────────
+// Downloads daily revenue summary as CSV
+router.get('/export/revenue', authAdmin, async (req, res) => {
+  try {
+    const store_id = req.user.store_id;
+
+    const { data: orders, error } = await supabase
+      .from('orders')
+      .select('total, payment_status, created_at')
+      .eq('store_id', store_id)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+
+    // Group by day
+    const byDay = {};
+    (orders || []).forEach(o => {
+      const day = new Date(o.created_at).toLocaleDateString('en-IN', {
+        day: '2-digit', month: 'short', year: 'numeric'
+      });
+      if (!byDay[day]) byDay[day] = { date: day, total_orders: 0, paid_orders: 0, failed_orders: 0, revenue: 0 };
+      byDay[day].total_orders++;
+      if (o.payment_status === 'paid') {
+        byDay[day].paid_orders++;
+        byDay[day].revenue += o.total || 0;
+      }
+      if (o.payment_status === 'failed') byDay[day].failed_orders++;
+    });
+
+    const rows = Object.values(byDay).map(d => ({
+      date:           d.date,
+      total_orders:   d.total_orders,
+      paid_orders:    d.paid_orders,
+      failed_orders:  d.failed_orders,
+      revenue:        d.revenue.toFixed(2),
+      avg_order:      d.paid_orders > 0
+                        ? (d.revenue / d.paid_orders).toFixed(2)
+                        : '0.00',
+    }));
+
+    const columns = ['date', 'total_orders', 'paid_orders', 'failed_orders', 'revenue', 'avg_order'];
+    const csv = toCSV(rows, columns);
+
+    const filename = `revenue_${new Date().toISOString().slice(0,10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(csv);
+
+  } catch (error) {
+    console.error('Export revenue error:', error.message);
+    return res.status(500).json({ error: 'Failed to export revenue.' });
+  }
+});
+
 module.exports = router;
