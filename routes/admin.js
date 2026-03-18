@@ -842,4 +842,100 @@ router.get('/export/revenue', authAdmin, async (req, res) => {
   }
 });
 
+
+
+router.put('/change-password', authAdmin, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body
+ 
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ error: 'Current and new password required.' })
+ 
+    if (newPassword.length < 6)
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' })
+ 
+    // Get current user with password
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, admin_password')
+      .eq('id', req.user.id)
+      .single()
+ 
+    if (error || !user)
+      return res.status(404).json({ error: 'User not found.' })
+ 
+    // Verify current password
+    const isValid = await bcrypt.compare(currentPassword, user.admin_password)
+    if (!isValid)
+      return res.status(401).json({ error: 'Current password is incorrect.' })
+ 
+    // Hash and update new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10)
+ 
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ admin_password: hashedPassword })
+      .eq('id', req.user.id)
+ 
+    if (updateError) throw updateError
+ 
+    return res.json({ success: true, message: 'Password changed successfully.' })
+ 
+  } catch (error) {
+    console.error('Change password error:', error.message)
+    return res.status(500).json({ error: 'Failed to change password.' })
+  }
+})
+
+
+// ── ADD THIS ROUTE to admin.js before module.exports ──
+// POST /api/admin/store/qr/regenerate
+// Generates a new QR code value, saves to Supabase, returns new QR image
+// No app impact — app always fetches current QR from server on session start
+
+router.post('/store/qr/regenerate', authAdmin, async (req, res) => {
+  try {
+    const store_id = req.user.store_id
+
+    // Get store name for QR value
+    const { data: store, error: storeError } = await supabase
+      .from('stores')
+      .select('name')
+      .eq('id', store_id)
+      .single()
+
+    if (storeError || !store)
+      return res.status(404).json({ error: 'Store not found.' })
+
+    // Generate new unique QR value
+    const newQRValue = `NIVO_${store.name.replace(/\s+/g, '_').toUpperCase()}_${Date.now()}`
+
+    // Save to Supabase
+    const { error: updateError } = await supabase
+      .from('stores')
+      .update({ entry_qr_code: newQRValue })
+      .eq('id', store_id)
+
+    if (updateError) throw updateError
+
+    // Generate QR image
+    const qrImage = await QRCode.toDataURL(newQRValue, {
+      width: 400,
+      margin: 2,
+      color: { dark: '#000000', light: '#ffffff' },
+    })
+
+    return res.json({
+      success: true,
+      qr_image: qrImage,
+      qr_code_value: newQRValue,
+      store_name: store.name,
+      message: 'QR code regenerated successfully.',
+    })
+
+  } catch (error) {
+    console.error('Regenerate QR error:', error.message)
+    return res.status(500).json({ error: 'Failed to regenerate QR code.' })
+  }
+})
 module.exports = router;
