@@ -1,27 +1,28 @@
 const express = require('express');
-const router = express.Router();
-const jwt = require('jsonwebtoken');
-const db = require('../db');
-const axios = require('axios');
+const router  = express.Router();
+const jwt     = require('jsonwebtoken');
+const db      = require('../db');
+const axios   = require('axios');
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
 const send2FactorOTP = async (phone, otp) => {
   const response = await axios.get(
-  `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${phone}/${otp}/AUTOGEN`
-);
+    `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${phone}/${otp}/AUTOGEN`
+  );
   console.log('2Factor response:', response.data);
   return response.data;
 };
 
+// ── POST /api/auth/send-otp ──
 router.post('/send-otp', async (req, res) => {
   const { phone } = req.body;
   if (!phone || phone.length !== 10) {
     return res.status(400).json({ error: 'Valid 10-digit phone required' });
   }
   try {
-    const otp = generateOTP();
-    const expires = new Date(Date.now() + 10 * 60 * 1000);
+    const otp     = generateOTP();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 min
 
     await db.query(
       `INSERT INTO otps (phone, otp, expires_at)
@@ -37,13 +38,13 @@ router.post('/send-otp', async (req, res) => {
       console.log(`✅ OTP sent via 2Factor to ${phone}`);
     } catch (smsError) {
       console.log(`⚠️ SMS failed: ${smsError.message}`);
-      console.log(`⚠️ Details: ${JSON.stringify(smsError.response?.data)}`);
       console.log(`📱 DEV OTP for ${phone}: ${otp}`);
     }
 
     res.json({
       success: true,
       message: smsSent ? 'OTP sent to your phone' : 'OTP ready',
+      // Only expose OTP in development
       otp: process.env.NODE_ENV !== 'production' ? otp : undefined
     });
 
@@ -53,6 +54,7 @@ router.post('/send-otp', async (req, res) => {
   }
 });
 
+// ── POST /api/auth/verify-otp ──
 router.post('/verify-otp', async (req, res) => {
   const { phone, otp } = req.body;
   if (!phone || !otp) {
@@ -60,8 +62,8 @@ router.post('/verify-otp', async (req, res) => {
   }
   try {
     const result = await db.query(
-      `SELECT * FROM otps 
-       WHERE phone = $1 AND otp = $2 
+      `SELECT * FROM otps
+       WHERE phone = $1 AND otp = $2
        AND expires_at > NOW() AND is_used = false`,
       [phone, otp]
     );
@@ -93,7 +95,11 @@ router.post('/verify-otp', async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
-    res.json({ success: true, token, user: user.rows[0] });
+    res.json({
+      success: true,
+      token,
+      user: user.rows[0]
+    });
 
   } catch (error) {
     console.error('Verify OTP error:', error);
