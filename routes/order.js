@@ -156,4 +156,91 @@ router.get('/history', authenticate, async (req, res) => {
   }
 });
 
+// ── ADD THIS ROUTE to routes/order.js ──
+// GET /api/order/:id/receipt
+// Returns full order with itemized bill for receipt screen
+
+router.get('/:id/receipt', authenticate, async (req, res) => {
+  try {
+    const order_id = req.params.id;
+    const user_id  = req.user.id;
+
+    // Get order (ensure it belongs to this user)
+    const orderResult = await db.query(
+      `SELECT o.*, s.name as store_name
+       FROM orders o
+       JOIN stores s ON s.id = o.store_id
+       WHERE o.id = $1 AND o.user_id = $2`,
+      [order_id, user_id]
+    );
+
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+
+    const order = orderResult.rows[0];
+
+    // Get order items with product details
+    const itemsResult = await db.query(
+      `SELECT 
+        oi.quantity,
+        oi.price_at_purchase,
+        p.name,
+        p.brand,
+        p.category,
+        p.barcode,
+        sp.price as current_price,
+        sp.mrp
+       FROM order_items oi
+       JOIN store_products sp ON sp.id = oi.store_product_id
+       JOIN products p ON p.id = sp.product_id
+       WHERE oi.order_id = $1
+       ORDER BY p.name`,
+      [order_id]
+    );
+
+    return res.json({
+      success: true,
+      order: {
+        id:                   order.id,
+        store_name:           order.store_name,
+        total:                order.total,
+        payment_status:       order.payment_status,
+        razorpay_payment_id:  order.razorpay_payment_id,
+        razorpay_order_id:    order.razorpay_order_id,
+        created_at:           order.created_at,
+      },
+      items: itemsResult.rows,
+    });
+
+  } catch (error) {
+    console.error('Receipt error:', error.message);
+    return res.status(500).json({ error: 'Could not load receipt.' });
+  }
+});
+
+// ── Also add to GET /api/order/history ──
+// Returns all past orders for Order History screen
+router.get('/history', authenticate, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT o.id, o.total, o.payment_status, o.created_at,
+              s.name as store_name,
+              COUNT(oi.id) as item_count
+       FROM orders o
+       JOIN stores s ON s.id = o.store_id
+       LEFT JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.user_id = $1
+       GROUP BY o.id, s.name
+       ORDER BY o.created_at DESC
+       LIMIT 50`,
+      [req.user.id]
+    );
+    return res.json({ success: true, orders: result.rows });
+  } catch (error) {
+    console.error('Order history error:', error.message);
+    return res.status(500).json({ error: 'Could not load orders.' });
+  }
+});
+
 module.exports = router;
