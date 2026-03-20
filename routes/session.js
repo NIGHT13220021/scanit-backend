@@ -160,25 +160,39 @@ router.post('/complete', authenticate, async (req, res) => {
   }
 });
 
-// ── Auto-expire sessions older than 3 hours ──────────────
+// ── Auto-expire — runs every 5 mins ─────────────────────
+// Handles app killed case — backend is source of truth
 const autoExpire = async () => {
   try {
-    const result = await db.query(
+    // 1. Abandon sessions with NO cart items after 30 mins
+    //    (user entered store but never scanned anything — likely left)
+    const r1 = await db.query(
       `UPDATE sessions
-       SET status = 'expired',
-           exit_time = NOW(),
+       SET status = 'abandoned', exit_time = NOW(),
+           duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+       WHERE status = 'active'
+         AND entry_time < NOW() - INTERVAL '30 minutes'
+         AND id NOT IN (SELECT DISTINCT session_id FROM cart_items)
+       RETURNING id`
+    );
+
+    // 2. Expire sessions older than 3 hours regardless (app killed mid-shop)
+    const r2 = await db.query(
+      `UPDATE sessions
+       SET status = 'expired', exit_time = NOW(),
            duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
        WHERE status = 'active'
          AND entry_time < NOW() - INTERVAL '3 hours'
        RETURNING id`
     );
-    if (result.rows.length > 0)
-      console.log(`Auto-expired ${result.rows.length} sessions`);
+
+    if (r1.rows.length > 0) console.log(`Auto-abandoned ${r1.rows.length} empty sessions`);
+    if (r2.rows.length > 0) console.log(`Auto-expired ${r2.rows.length} old sessions`);
   } catch (e) {
     console.error('Auto-expire error:', e.message);
   }
 };
-setInterval(autoExpire, 15 * 60 * 1000);
+setInterval(autoExpire, 5 * 60 * 1000); // every 5 mins
 autoExpire();
 
 
