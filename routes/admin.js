@@ -314,12 +314,12 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
     const enriched = await Promise.all(sessions.map(async s => {
       const { data: cartItems } = await supabase
         .from('cart_items')
-        .select('id, quantity, store_products(price, products(name))')
+        .select('id, quantity, price_at_scan, products(name)')
         .eq('session_id', s.id);
 
       const items = cartItems || [];
       const total = items.reduce((sum, i) =>
-        sum + ((i.quantity || 0) * (i.store_products?.price || 0)), 0);
+        sum + ((i.quantity || 0) * (parseFloat(i.price_at_scan) || 0)), 0);
 
       return {
         session_id:  s.id,
@@ -328,9 +328,9 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
         cart_total:  total,
         minutes_ago: Math.floor((Date.now() - new Date(s.entry_time).getTime()) / 60000),
         cart: items.map(i => ({
-          name:     i.store_products?.products?.name || 'Unknown',
+          name:     i.products?.name || 'Unknown',
           quantity: i.quantity,
-          price:    i.store_products?.price || 0,
+          price:    parseFloat(i.price_at_scan) || 0,
         })),
       };
     }));
