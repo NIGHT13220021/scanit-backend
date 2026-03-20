@@ -8,8 +8,6 @@ require('dotenv').config();
 
 const axios = require('axios');
 
-// In-memory OTP store  →  phone: { otp, expiresAt, userId, verified }
-// Fine for single-server. Swap with Redis for multi-instance deployments.
 const otpStore = new Map();
 
 const supabase = createClient(
@@ -57,7 +55,6 @@ const authSuperAdmin = (req, res, next) => {
 // AUTH — LOGIN
 // ════════════════════════════════════════════════════════
 
-// POST /api/admin/login
 router.post('/login', async (req, res) => {
   try {
     const { phone, password } = req.body;
@@ -115,10 +112,9 @@ router.post('/login', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// AUTH — FORGOT PASSWORD (3-step OTP flow via 2Factor)
+// AUTH — FORGOT PASSWORD
 // ════════════════════════════════════════════════════════
 
-// POST /api/admin/forgot-password   →  Step 1: send OTP
 router.post('/forgot-password', async (req, res) => {
   try {
     const { phone } = req.body;
@@ -131,16 +127,14 @@ router.post('/forgot-password', async (req, res) => {
       .in('role', ['store_owner', 'super_admin'])
       .single();
 
-    // Generic response — don't leak whether number exists
     if (error || !user)
       return res.json({ success: true, message: 'If this number is registered, an OTP has been sent.' });
 
     const otp       = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
+    const expiresAt = Date.now() + 10 * 60 * 1000;
 
     otpStore.set(phone, { otp, expiresAt, userId: user.id, verified: false });
 
-    // 2Factor VOICE OTP — calls the phone and reads the OTP aloud
     const apiKey  = process.env.TWOFACTOR_API_KEY;
     const smsUrl  = `https://2factor.in/API/V1/${apiKey}/VOICE/${phone}/${otp}`;
     const smsRes  = await axios.get(smsUrl);
@@ -151,9 +145,7 @@ router.post('/forgot-password', async (req, res) => {
       return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
     }
 
-    // ⚠️  Remove the line below in production
     console.log(`[DEV] OTP for ${phone}: ${otp}`);
-
     return res.json({ success: true, message: 'OTP sent successfully.' });
 
   } catch (error) {
@@ -162,7 +154,6 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-// POST /api/admin/verify-otp   →  Step 2: verify OTP
 router.post('/verify-otp', async (req, res) => {
   try {
     const { phone, otp } = req.body;
@@ -181,9 +172,7 @@ router.post('/verify-otp', async (req, res) => {
     if (record.otp !== otp.trim())
       return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
 
-    // Mark verified — keep in store so reset step can confirm it
     otpStore.set(phone, { ...record, verified: true });
-
     return res.json({ success: true, message: 'OTP verified successfully.' });
 
   } catch (error) {
@@ -192,7 +181,6 @@ router.post('/verify-otp', async (req, res) => {
   }
 });
 
-// POST /api/admin/reset-password   →  Step 3: set new password
 router.post('/reset-password', async (req, res) => {
   try {
     const { phone, otp, newPassword } = req.body;
@@ -225,8 +213,7 @@ router.post('/reset-password', async (req, res) => {
 
     if (error) throw error;
 
-    otpStore.delete(phone); // clean up
-
+    otpStore.delete(phone);
     return res.json({ success: true, message: 'Password reset successfully. Please login.' });
 
   } catch (error) {
@@ -239,7 +226,6 @@ router.post('/reset-password', async (req, res) => {
 // STORE OWNER — STATS
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/stats
 router.get('/stats', authAdmin, async (req, res) => {
   try {
     const store_id   = req.user.store_id;
@@ -278,7 +264,6 @@ router.get('/stats', authAdmin, async (req, res) => {
 // ORDERS
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/orders
 router.get('/orders', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
@@ -306,20 +291,23 @@ router.get('/orders', authAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// LIVE SESSIONS
+// LIVE SESSIONS — FIXED: uses entry_time not created_at
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/sessions/live
 router.get('/sessions/live', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
 
     const { data: sessions, error } = await supabase
       .from('sessions')
-      .select(`id, created_at, user_id, users(phone), cart_items(quantity, store_products(price, products(name)))`)
+      .select(`
+        id, entry_time, user_id,
+        users(phone),
+        cart_items(quantity, store_products(price, products(name)))
+      `)
       .eq('store_id', store_id)
       .eq('status', 'active')
-      .order('created_at', { ascending: false });
+      .order('entry_time', { ascending: false });   // ✅ FIXED: was created_at
 
     if (error) throw error;
 
@@ -330,7 +318,7 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
         phone:       s.users?.phone || 'Unknown',
         item_count:  items.length,
         cart_total:  items.reduce((sum, i) => sum + (i.quantity * (i.store_products?.price || 0)), 0),
-        minutes_ago: Math.floor((Date.now() - new Date(s.created_at).getTime()) / 60000),
+        minutes_ago: Math.floor((Date.now() - new Date(s.entry_time).getTime()) / 60000), // ✅ FIXED: was created_at
         cart: items.map(i => ({
           name:     i.store_products?.products?.name || 'Unknown',
           quantity: i.quantity,
@@ -351,7 +339,6 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
 // PRODUCTS
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/products
 router.get('/products', authAdmin, async (req, res) => {
   try {
     const { data: products, error } = await supabase
@@ -383,7 +370,6 @@ router.get('/products', authAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/products
 router.post('/products', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
@@ -403,7 +389,10 @@ router.post('/products', authAdmin, async (req, res) => {
 
     const { data: storeProduct, error: spError } = await supabase
       .from('store_products')
-      .upsert({ store_id, product_id: product.id, price, mrp: price, gst_percent: 0, in_stock: true }, { onConflict: 'store_id,product_id' })
+      .upsert(
+        { store_id, product_id: product.id, price, mrp: price, gst_percent: 0, in_stock: true },
+        { onConflict: 'store_id,product_id' }
+      )
       .select().single();
 
     if (spError) throw spError;
@@ -416,7 +405,6 @@ router.post('/products', authAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/products/:id
 router.put('/products/:id', authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -446,7 +434,6 @@ router.put('/products/:id', authAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/products/:id
 router.delete('/products/:id', authAdmin, async (req, res) => {
   try {
     const { error } = await supabase
@@ -468,7 +455,6 @@ router.delete('/products/:id', authAdmin, async (req, res) => {
 // STORE QR + SETTINGS
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/store/qr
 router.get('/store/qr', authAdmin, async (req, res) => {
   try {
     const { data: store, error } = await supabase
@@ -488,7 +474,35 @@ router.get('/store/qr', authAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/store
+router.post('/store/qr/regenerate', authAdmin, async (req, res) => {
+  try {
+    const store_id = req.user.store_id;
+
+    const { data: store, error: storeError } = await supabase
+      .from('stores').select('name').eq('id', store_id).single();
+
+    if (storeError || !store)
+      return res.status(404).json({ error: 'Store not found.' });
+
+    const newQRValue = `NIVO_${store.name.replace(/\s+/g, '_').toUpperCase()}_${Date.now()}`;
+
+    const { error: updateError } = await supabase
+      .from('stores').update({ entry_qr_code: newQRValue }).eq('id', store_id);
+
+    if (updateError) throw updateError;
+
+    const qrImage = await QRCode.toDataURL(newQRValue, {
+      width: 400, margin: 2, color: { dark: '#000000', light: '#ffffff' },
+    });
+
+    return res.json({ success: true, qr_image: qrImage, qr_code_value: newQRValue, store_name: store.name });
+
+  } catch (error) {
+    console.error('Regenerate QR error:', error.message);
+    return res.status(500).json({ error: 'Failed to regenerate QR code.' });
+  }
+});
+
 router.get('/store', authAdmin, async (req, res) => {
   try {
     const { data: store, error } = await supabase
@@ -500,7 +514,6 @@ router.get('/store', authAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/store
 router.put('/store', authAdmin, async (req, res) => {
   try {
     const { name, address, phone } = req.body;
@@ -514,10 +527,48 @@ router.put('/store', authAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
+// CHANGE PASSWORD
+// ════════════════════════════════════════════════════════
+
+router.put('/change-password', authAdmin, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ error: 'Current and new password required.' });
+
+    if (newPassword.length < 6)
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+
+    const { data: user, error } = await supabase
+      .from('users').select('id, admin_password').eq('id', req.user.id).single();
+
+    if (error || !user)
+      return res.status(404).json({ error: 'User not found.' });
+
+    const isValid = await bcrypt.compare(currentPassword, user.admin_password);
+    if (!isValid)
+      return res.status(401).json({ error: 'Current password is incorrect.' });
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    const { error: updateError } = await supabase
+      .from('users').update({ admin_password: hashedPassword }).eq('id', req.user.id);
+
+    if (updateError) throw updateError;
+
+    return res.json({ success: true, message: 'Password changed successfully.' });
+
+  } catch (error) {
+    console.error('Change password error:', error.message);
+    return res.status(500).json({ error: 'Failed to change password.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════
 // ANALYTICS
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/analytics
 router.get('/analytics', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
@@ -560,10 +611,130 @@ router.get('/analytics', authAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
+// CSV EXPORTS
+// ════════════════════════════════════════════════════════
+
+function toCSV(rows, columns) {
+  if (!rows || rows.length === 0) return columns.join(',') + '\n';
+  const header = columns.join(',');
+  const body = rows.map(row =>
+    columns.map(col => {
+      const val = row[col] === null || row[col] === undefined ? '' : String(row[col]);
+      return val.includes(',') || val.includes('"') || val.includes('\n')
+        ? `"${val.replace(/"/g, '""')}"` : val;
+    }).join(',')
+  ).join('\n');
+  return header + '\n' + body;
+}
+
+router.get('/export/orders', authAdmin, async (req, res) => {
+  try {
+    const { from, to, status } = req.query;
+
+    let query = supabase
+      .from('orders')
+      .select('id, total, payment_status, razorpay_payment_id, created_at, users(phone)')
+      .order('created_at', { ascending: false });
+
+    if (req.user.role === 'store_owner') query = query.eq('store_id', req.user.store_id);
+    if (status && status !== 'all')      query = query.eq('payment_status', status);
+    if (from)  query = query.gte('created_at', new Date(from).toISOString());
+    if (to)    query = query.lte('created_at', new Date(to).toISOString());
+
+    const { data: orders, error } = await query;
+    if (error) throw error;
+
+    const rows = (orders || []).map(o => ({
+      order_id:       o.id,
+      customer_phone: o.users?.phone || '—',
+      amount:         o.total || 0,
+      status:         o.payment_status,
+      payment_id:     o.razorpay_payment_id || '—',
+      date:           new Date(o.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+    }));
+
+    const csv = toCSV(rows, ['order_id','customer_phone','amount','status','payment_id','date']);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="orders_${new Date().toISOString().slice(0,10)}.csv"`);
+    return res.send(csv);
+
+  } catch (error) {
+    console.error('Export orders error:', error.message);
+    return res.status(500).json({ error: 'Failed to export orders.' });
+  }
+});
+
+router.get('/export/products', authAdmin, async (req, res) => {
+  try {
+    const { data: products, error } = await supabase
+      .from('store_products')
+      .select('id, price, mrp, gst_percent, in_stock, products(name, barcode, brand, category)')
+      .eq('store_id', req.user.store_id)
+      .order('updated_at', { ascending: false });
+
+    if (error) throw error;
+
+    const rows = (products || []).map(sp => ({
+      barcode:     sp.products?.barcode || '—',
+      name:        sp.products?.name    || '—',
+      brand:       sp.products?.brand   || '—',
+      category:    sp.products?.category || '—',
+      price:       sp.price    || 0,
+      mrp:         sp.mrp      || 0,
+      gst_percent: sp.gst_percent || 0,
+      in_stock:    sp.in_stock ? 'Yes' : 'No',
+    }));
+
+    const csv = toCSV(rows, ['barcode','name','brand','category','price','mrp','gst_percent','in_stock']);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="products_${new Date().toISOString().slice(0,10)}.csv"`);
+    return res.send(csv);
+
+  } catch (error) {
+    console.error('Export products error:', error.message);
+    return res.status(500).json({ error: 'Failed to export products.' });
+  }
+});
+
+router.get('/export/revenue', authAdmin, async (req, res) => {
+  try {
+    const { data: orders, error } = await supabase
+      .from('orders').select('total, payment_status, created_at')
+      .eq('store_id', req.user.store_id)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+
+    const byDay = {};
+    (orders || []).forEach(o => {
+      const day = new Date(o.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+      if (!byDay[day]) byDay[day] = { date: day, total_orders: 0, paid_orders: 0, failed_orders: 0, revenue: 0 };
+      byDay[day].total_orders++;
+      if (o.payment_status === 'paid') { byDay[day].paid_orders++; byDay[day].revenue += o.total || 0; }
+      if (o.payment_status === 'failed') byDay[day].failed_orders++;
+    });
+
+    const rows = Object.values(byDay).map(d => ({
+      date: d.date, total_orders: d.total_orders, paid_orders: d.paid_orders,
+      failed_orders: d.failed_orders, revenue: d.revenue.toFixed(2),
+      avg_order: d.paid_orders > 0 ? (d.revenue / d.paid_orders).toFixed(2) : '0.00',
+    }));
+
+    const csv = toCSV(rows, ['date','total_orders','paid_orders','failed_orders','revenue','avg_order']);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="revenue_${new Date().toISOString().slice(0,10)}.csv"`);
+    return res.send(csv);
+
+  } catch (error) {
+    console.error('Export revenue error:', error.message);
+    return res.status(500).json({ error: 'Failed to export revenue.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════
 // USERS
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/users
 router.get('/users', authAdmin, async (req, res) => {
   try {
     const { data: users, error } = await supabase
@@ -580,7 +751,6 @@ router.get('/users', authAdmin, async (req, res) => {
 // SUPER ADMIN
 // ════════════════════════════════════════════════════════
 
-// GET /api/admin/superadmin/stats
 router.get('/superadmin/stats', authSuperAdmin, async (req, res) => {
   try {
     const [
@@ -609,7 +779,6 @@ router.get('/superadmin/stats', authSuperAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/superadmin/stores
 router.get('/superadmin/stores', authSuperAdmin, async (req, res) => {
   try {
     const { data: stores, error } = await supabase
@@ -619,8 +788,7 @@ router.get('/superadmin/stores', authSuperAdmin, async (req, res) => {
     const enriched = await Promise.all((stores || []).map(async store => {
       const { data: orders } = await supabase
         .from('orders').select('total').eq('store_id', store.id).eq('payment_status', 'paid');
-      const revenue = (orders || []).reduce((s, o) => s + (o.total || 0), 0);
-      return { ...store, order_count: orders?.length || 0, total_revenue: revenue };
+      return { ...store, order_count: orders?.length || 0, total_revenue: (orders || []).reduce((s, o) => s + (o.total || 0), 0) };
     }));
 
     return res.json({ success: true, stores: enriched });
@@ -631,7 +799,6 @@ router.get('/superadmin/stores', authSuperAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/superadmin/stores
 router.post('/superadmin/stores', authSuperAdmin, async (req, res) => {
   try {
     const { name, address, phone, city, owner_phone, owner_password, plan } = req.body;
@@ -670,7 +837,6 @@ router.post('/superadmin/stores', authSuperAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/superadmin/stores/:id/billing
 router.put('/superadmin/stores/:id/billing', authSuperAdmin, async (req, res) => {
   try {
     const { is_active, plan } = req.body;
@@ -682,260 +848,4 @@ router.put('/superadmin/stores/:id/billing', authSuperAdmin, async (req, res) =>
   }
 });
 
-
-// ════════════════════════════════════════════════════════
-// CSV EXPORT ROUTES
-// Add these 3 routes to your admin.js before module.exports
-// ════════════════════════════════════════════════════════
-
-// Helper — convert array of objects to CSV string
-function toCSV(rows, columns) {
-  if (!rows || rows.length === 0) return columns.join(',') + '\n';
-  const header = columns.join(',');
-  const body = rows.map(row =>
-    columns.map(col => {
-      const val = row[col] === null || row[col] === undefined ? '' : String(row[col]);
-      // Wrap in quotes if contains comma, quote or newline
-      return val.includes(',') || val.includes('"') || val.includes('\n')
-        ? `"${val.replace(/"/g, '""')}"`
-        : val;
-    }).join(',')
-  ).join('\n');
-  return header + '\n' + body;
-}
-
-// ── GET /api/admin/export/orders ─────────────────────────
-// Downloads all orders as CSV
-router.get('/export/orders', authAdmin, async (req, res) => {
-  try {
-    const store_id = req.user.store_id;
-    const { from, to, status } = req.query;
-
-    let query = supabase
-      .from('orders')
-      .select('id, total, payment_status, razorpay_payment_id, created_at, users(phone)')
-      .order('created_at', { ascending: false });
-
-    if (req.user.role === 'store_owner') query = query.eq('store_id', store_id);
-    if (status && status !== 'all')      query = query.eq('payment_status', status);
-    if (from)  query = query.gte('created_at', new Date(from).toISOString());
-    if (to)    query = query.lte('created_at', new Date(to).toISOString());
-
-    const { data: orders, error } = await query;
-    if (error) throw error;
-
-    // Flatten for CSV
-    const rows = (orders || []).map(o => ({
-      order_id:           o.id,
-      customer_phone:     o.users?.phone || '—',
-      amount:             o.total || 0,
-      status:             o.payment_status,
-      payment_id:         o.razorpay_payment_id || '—',
-      date:               new Date(o.created_at).toLocaleDateString('en-IN', {
-                            day: '2-digit', month: 'short', year: 'numeric',
-                            hour: '2-digit', minute: '2-digit'
-                          }),
-    }));
-
-    const columns = ['order_id', 'customer_phone', 'amount', 'status', 'payment_id', 'date'];
-    const csv = toCSV(rows, columns);
-
-    const filename = `orders_${new Date().toISOString().slice(0,10)}.csv`;
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.send(csv);
-
-  } catch (error) {
-    console.error('Export orders error:', error.message);
-    return res.status(500).json({ error: 'Failed to export orders.' });
-  }
-});
-
-// ── GET /api/admin/export/products ───────────────────────
-// Downloads all store products as CSV
-router.get('/export/products', authAdmin, async (req, res) => {
-  try {
-    const { data: products, error } = await supabase
-      .from('store_products')
-      .select('id, price, mrp, gst_percent, in_stock, products(name, barcode, brand, category)')
-      .eq('store_id', req.user.store_id)
-      .order('updated_at', { ascending: false });
-
-    if (error) throw error;
-
-    const rows = (products || []).map(sp => ({
-      barcode:     sp.products?.barcode || '—',
-      name:        sp.products?.name    || '—',
-      brand:       sp.products?.brand   || '—',
-      category:    sp.products?.category || '—',
-      price:       sp.price    || 0,
-      mrp:         sp.mrp      || 0,
-      gst_percent: sp.gst_percent || 0,
-      in_stock:    sp.in_stock ? 'Yes' : 'No',
-    }));
-
-    const columns = ['barcode', 'name', 'brand', 'category', 'price', 'mrp', 'gst_percent', 'in_stock'];
-    const csv = toCSV(rows, columns);
-
-    const filename = `products_${new Date().toISOString().slice(0,10)}.csv`;
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.send(csv);
-
-  } catch (error) {
-    console.error('Export products error:', error.message);
-    return res.status(500).json({ error: 'Failed to export products.' });
-  }
-});
-
-// ── GET /api/admin/export/revenue ────────────────────────
-// Downloads daily revenue summary as CSV
-router.get('/export/revenue', authAdmin, async (req, res) => {
-  try {
-    const store_id = req.user.store_id;
-
-    const { data: orders, error } = await supabase
-      .from('orders')
-      .select('total, payment_status, created_at')
-      .eq('store_id', store_id)
-      .order('created_at', { ascending: true });
-
-    if (error) throw error;
-
-    // Group by day
-    const byDay = {};
-    (orders || []).forEach(o => {
-      const day = new Date(o.created_at).toLocaleDateString('en-IN', {
-        day: '2-digit', month: 'short', year: 'numeric'
-      });
-      if (!byDay[day]) byDay[day] = { date: day, total_orders: 0, paid_orders: 0, failed_orders: 0, revenue: 0 };
-      byDay[day].total_orders++;
-      if (o.payment_status === 'paid') {
-        byDay[day].paid_orders++;
-        byDay[day].revenue += o.total || 0;
-      }
-      if (o.payment_status === 'failed') byDay[day].failed_orders++;
-    });
-
-    const rows = Object.values(byDay).map(d => ({
-      date:           d.date,
-      total_orders:   d.total_orders,
-      paid_orders:    d.paid_orders,
-      failed_orders:  d.failed_orders,
-      revenue:        d.revenue.toFixed(2),
-      avg_order:      d.paid_orders > 0
-                        ? (d.revenue / d.paid_orders).toFixed(2)
-                        : '0.00',
-    }));
-
-    const columns = ['date', 'total_orders', 'paid_orders', 'failed_orders', 'revenue', 'avg_order'];
-    const csv = toCSV(rows, columns);
-
-    const filename = `revenue_${new Date().toISOString().slice(0,10)}.csv`;
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.send(csv);
-
-  } catch (error) {
-    console.error('Export revenue error:', error.message);
-    return res.status(500).json({ error: 'Failed to export revenue.' });
-  }
-});
-
-
-
-router.put('/change-password', authAdmin, async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body
- 
-    if (!currentPassword || !newPassword)
-      return res.status(400).json({ error: 'Current and new password required.' })
- 
-    if (newPassword.length < 6)
-      return res.status(400).json({ error: 'Password must be at least 6 characters.' })
- 
-    // Get current user with password
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, admin_password')
-      .eq('id', req.user.id)
-      .single()
- 
-    if (error || !user)
-      return res.status(404).json({ error: 'User not found.' })
- 
-    // Verify current password
-    const isValid = await bcrypt.compare(currentPassword, user.admin_password)
-    if (!isValid)
-      return res.status(401).json({ error: 'Current password is incorrect.' })
- 
-    // Hash and update new password
-    const hashedPassword = await bcrypt.hash(newPassword, 10)
- 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ admin_password: hashedPassword })
-      .eq('id', req.user.id)
- 
-    if (updateError) throw updateError
- 
-    return res.json({ success: true, message: 'Password changed successfully.' })
- 
-  } catch (error) {
-    console.error('Change password error:', error.message)
-    return res.status(500).json({ error: 'Failed to change password.' })
-  }
-})
-
-
-// ── ADD THIS ROUTE to admin.js before module.exports ──
-// POST /api/admin/store/qr/regenerate
-// Generates a new QR code value, saves to Supabase, returns new QR image
-// No app impact — app always fetches current QR from server on session start
-
-router.post('/store/qr/regenerate', authAdmin, async (req, res) => {
-  try {
-    const store_id = req.user.store_id
-
-    // Get store name for QR value
-    const { data: store, error: storeError } = await supabase
-      .from('stores')
-      .select('name')
-      .eq('id', store_id)
-      .single()
-
-    if (storeError || !store)
-      return res.status(404).json({ error: 'Store not found.' })
-
-    // Generate new unique QR value
-    const newQRValue = `NIVO_${store.name.replace(/\s+/g, '_').toUpperCase()}_${Date.now()}`
-
-    // Save to Supabase
-    const { error: updateError } = await supabase
-      .from('stores')
-      .update({ entry_qr_code: newQRValue })
-      .eq('id', store_id)
-
-    if (updateError) throw updateError
-
-    // Generate QR image
-    const qrImage = await QRCode.toDataURL(newQRValue, {
-      width: 400,
-      margin: 2,
-      color: { dark: '#000000', light: '#ffffff' },
-    })
-
-    return res.json({
-      success: true,
-      qr_image: qrImage,
-      qr_code_value: newQRValue,
-      store_name: store.name,
-      message: 'QR code regenerated successfully.',
-    })
-
-  } catch (error) {
-    console.error('Regenerate QR error:', error.message)
-    return res.status(500).json({ error: 'Failed to regenerate QR code.' })
-  }
-})
 module.exports = router;
