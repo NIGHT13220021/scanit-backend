@@ -21,14 +21,15 @@ router.post('/start', authenticate, async (req, res) => {
 
     const storeData = store.rows[0];
 
-    // Check for ANY existing session (active OR abandoned) for this user+store
+    // Check for ANY recent session — reactivate within 24h (industry standard) for this user+store
     const existing = await db.query(
       `SELECT s.*, st.name as store_name
        FROM sessions s
        JOIN stores st ON st.id = s.store_id
        WHERE s.user_id = $1
          AND s.store_id = $2
-         AND s.status IN ('active', 'abandoned')
+         AND s.status IN ('active', 'abandoned', 'expired')
+         AND s.entry_time > NOW() - INTERVAL '24 hours'
        ORDER BY s.entry_time DESC
        LIMIT 1`,
       [req.user.id, storeData.id]
@@ -179,5 +180,27 @@ const autoExpire = async () => {
 };
 setInterval(autoExpire, 15 * 60 * 1000);
 autoExpire();
+
+
+// GET /api/store/:store_id/qr-value
+// App calls this to get store QR for session reactivation
+router.get("/store/:store_id/qr-value", authenticate, async (req, res) => {
+  try {
+    const { store_id } = req.params;
+    const store = await db.query(
+      "SELECT entry_qr_code, name FROM stores WHERE id = $1 AND is_active = true",
+      [store_id]
+    );
+    if (store.rows.length === 0)
+      return res.status(404).json({ error: "Store not found" });
+    return res.json({
+      success: true,
+      qr_code_value: store.rows[0].entry_qr_code,
+      store_name: store.rows[0].name
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "Could not get store QR" });
+  }
+});
 
 module.exports = router;
