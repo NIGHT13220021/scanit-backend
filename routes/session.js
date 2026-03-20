@@ -7,9 +7,11 @@ const { authenticate } = require('../middleware/auth');
 // ── POST /api/session/start ──────────────────────────────
 router.post('/start', authenticate, async (req, res) => {
   const { store_qr_code } = req.body;
-  if (!store_qr_code) return res.status(400).json({ error: 'Store QR code required' });
+  if (!store_qr_code)
+    return res.status(400).json({ error: 'Store QR code required' });
 
   try {
+    // Find store
     const store = await db.query(
       'SELECT * FROM stores WHERE entry_qr_code = $1 AND is_active = true',
       [store_qr_code]
@@ -19,43 +21,65 @@ router.post('/start', authenticate, async (req, res) => {
 
     const storeData = store.rows[0];
 
-    // Check existing active session
+    // Check for ANY existing session (active OR abandoned) for this user+store
     const existing = await db.query(
-      `SELECT s.*, st.name as store_name 
+      `SELECT s.*, st.name as store_name
        FROM sessions s
        JOIN stores st ON st.id = s.store_id
-       WHERE s.user_id = $1 AND s.status = 'active'`,
-      [req.user.id]
+       WHERE s.user_id = $1
+         AND s.store_id = $2
+         AND s.status IN ('active', 'abandoned')
+       ORDER BY s.entry_time DESC
+       LIMIT 1`,
+      [req.user.id, storeData.id]
     );
 
     if (existing.rows.length > 0) {
       const s = existing.rows[0];
-      // Same store — resume existing session
-      if (s.store_id === storeData.id) {
-        return res.json({
-          success: true, resumed: true,
-          session: s,
-          store: { id: storeData.id, name: storeData.name, city: storeData.city }
-        });
-      }
-      // Different store — abandon old, start new
-      await db.query(
-        `UPDATE sessions SET status='abandoned', exit_time=NOW(),
-         duration_mins=ROUND(EXTRACT(EPOCH FROM (NOW()-entry_time))/60)
-         WHERE id=$1`,
+
+      // Resume: set back to active
+      const resumed = await db.query(
+        `UPDATE sessions
+         SET status = 'active', exit_time = NULL
+         WHERE id = $1
+         RETURNING *`,
         [s.id]
+      );
+
+      return res.json({
+        success: true,
+        resumed: true,
+        session: { ...resumed.rows[0], store_name: storeData.name },
+        store: { id: storeData.id, name: storeData.name, city: storeData.city }
+      });
+    }
+
+    // Check if user has active session at a DIFFERENT store — abandon it
+    const otherStore = await db.query(
+      `SELECT id FROM sessions
+       WHERE user_id = $1 AND status = 'active' AND store_id != $2`,
+      [req.user.id, storeData.id]
+    );
+    if (otherStore.rows.length > 0) {
+      await db.query(
+        `UPDATE sessions
+         SET status = 'abandoned', exit_time = NOW(),
+             duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+         WHERE id = $1`,
+        [otherStore.rows[0].id]
       );
     }
 
-    // Create new session
+    // Create brand new session
     const session = await db.query(
       `INSERT INTO sessions (session_code, user_id, store_id, status, entry_time)
-       VALUES ($1,$2,$3,'active',NOW()) RETURNING *`,
+       VALUES ($1, $2, $3, 'active', NOW()) RETURNING *`,
       [uuidv4(), req.user.id, storeData.id]
     );
 
     return res.json({
-      success: true, resumed: false,
+      success: true,
+      resumed: false,
       session: { ...session.rows[0], store_name: storeData.name },
       store: { id: storeData.id, name: storeData.name, city: storeData.city }
     });
@@ -70,9 +94,10 @@ router.post('/start', authenticate, async (req, res) => {
 router.get('/current', authenticate, async (req, res) => {
   try {
     const session = await db.query(
-      `SELECT s.*, st.name as store_name FROM sessions s
+      `SELECT s.*, st.name as store_name
+       FROM sessions s
        JOIN stores st ON st.id = s.store_id
-       WHERE s.user_id=$1 AND s.status='active'
+       WHERE s.user_id = $1 AND s.status = 'active'
        ORDER BY s.entry_time DESC LIMIT 1`,
       [req.user.id]
     );
@@ -83,23 +108,22 @@ router.get('/current', authenticate, async (req, res) => {
 });
 
 // ── POST /api/session/end ────────────────────────────────
-// Called when app goes background or user manually ends
 router.post('/end', authenticate, async (req, res) => {
   try {
     const { reason = 'abandoned' } = req.body;
 
     const result = await db.query(
       `UPDATE sessions
-       SET status=$1, exit_time=NOW(),
-           duration_mins=ROUND(EXTRACT(EPOCH FROM (NOW()-entry_time))/60)
-       WHERE user_id=$2 AND status='active'
+       SET status = $1,
+           exit_time = NOW(),
+           duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+       WHERE user_id = $2 AND status = 'active'
        RETURNING *`,
       [reason === 'completed' ? 'completed' : 'abandoned', req.user.id]
     );
 
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.json({ success: true, message: 'No active session' });
-    }
 
     return res.json({ success: true, session: result.rows[0] });
 
@@ -110,17 +134,19 @@ router.post('/end', authenticate, async (req, res) => {
 });
 
 // ── POST /api/session/complete ───────────────────────────
-// Called after successful payment
 router.post('/complete', authenticate, async (req, res) => {
   try {
     const { session_id, total_amount, item_count } = req.body;
 
     const result = await db.query(
       `UPDATE sessions
-       SET status='completed', exit_time=NOW(), payment_time=NOW(),
-           total_amount=$1, item_count=$2,
-           duration_mins=ROUND(EXTRACT(EPOCH FROM (NOW()-entry_time))/60)
-       WHERE id=$3 AND user_id=$4
+       SET status = 'completed',
+           exit_time = NOW(),
+           payment_time = NOW(),
+           total_amount = $1,
+           item_count = $2,
+           duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+       WHERE id = $3 AND user_id = $4
        RETURNING *`,
       [total_amount || 0, item_count || 0, session_id, req.user.id]
     );
@@ -138,9 +164,11 @@ const autoExpire = async () => {
   try {
     const result = await db.query(
       `UPDATE sessions
-       SET status='expired', exit_time=NOW(),
-           duration_mins=ROUND(EXTRACT(EPOCH FROM (NOW()-entry_time))/60)
-       WHERE status='active' AND entry_time < NOW() - INTERVAL '3 hours'
+       SET status = 'expired',
+           exit_time = NOW(),
+           duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+       WHERE status = 'active'
+         AND entry_time < NOW() - INTERVAL '3 hours'
        RETURNING id`
     );
     if (result.rows.length > 0)

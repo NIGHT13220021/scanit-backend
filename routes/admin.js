@@ -293,30 +293,33 @@ router.get('/orders', authAdmin, async (req, res) => {
 // ════════════════════════════════════════════════════════
 // LIVE SESSIONS — FIXED: uses entry_time not created_at
 // ════════════════════════════════════════════════════════
+
 router.get('/sessions/live', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
 
-    // Step 1: Get active sessions
+    // Step 1: Get active sessions + user phone
     const { data: sessions, error } = await supabase
       .from('sessions')
-      .select(`id, entry_time, user_id, users(phone)`)
+      .select('id, entry_time, user_id, users(phone)')
       .eq('store_id', store_id)
       .eq('status', 'active')
       .order('entry_time', { ascending: false });
 
     if (error) throw error;
+    if (!sessions || sessions.length === 0)
+      return res.json({ success: true, sessions: [] });
 
-    // Step 2: Get cart items separately for each session
-    const enriched = await Promise.all((sessions || []).map(async s => {
+    // Step 2: Get cart items for each session separately
+    const enriched = await Promise.all(sessions.map(async s => {
       const { data: cartItems } = await supabase
         .from('cart_items')
-        .select(`quantity, store_products(price, products(name))`)
+        .select('id, quantity, store_products(price, products(name))')
         .eq('session_id', s.id);
 
       const items = cartItems || [];
       const total = items.reduce((sum, i) =>
-        sum + (i.quantity * (i.store_products?.price || 0)), 0);
+        sum + ((i.quantity || 0) * (i.store_products?.price || 0)), 0);
 
       return {
         session_id:  s.id,
