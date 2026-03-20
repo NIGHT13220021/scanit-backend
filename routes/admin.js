@@ -293,39 +293,44 @@ router.get('/orders', authAdmin, async (req, res) => {
 // ════════════════════════════════════════════════════════
 // LIVE SESSIONS — FIXED: uses entry_time not created_at
 // ════════════════════════════════════════════════════════
-
 router.get('/sessions/live', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
 
+    // Step 1: Get active sessions
     const { data: sessions, error } = await supabase
       .from('sessions')
-      .select(`
-        id, entry_time, user_id,
-        users(phone),
-        cart_items(quantity, store_products(price, products(name)))
-      `)
+      .select(`id, entry_time, user_id, users(phone)`)
       .eq('store_id', store_id)
       .eq('status', 'active')
-      .order('entry_time', { ascending: false });   // ✅ FIXED: was created_at
+      .order('entry_time', { ascending: false });
 
     if (error) throw error;
 
-    const enriched = (sessions || []).map(s => {
-      const items = s.cart_items || [];
+    // Step 2: Get cart items separately for each session
+    const enriched = await Promise.all((sessions || []).map(async s => {
+      const { data: cartItems } = await supabase
+        .from('cart_items')
+        .select(`quantity, store_products(price, products(name))`)
+        .eq('session_id', s.id);
+
+      const items = cartItems || [];
+      const total = items.reduce((sum, i) =>
+        sum + (i.quantity * (i.store_products?.price || 0)), 0);
+
       return {
         session_id:  s.id,
         phone:       s.users?.phone || 'Unknown',
         item_count:  items.length,
-        cart_total:  items.reduce((sum, i) => sum + (i.quantity * (i.store_products?.price || 0)), 0),
-        minutes_ago: Math.floor((Date.now() - new Date(s.entry_time).getTime()) / 60000), // ✅ FIXED: was created_at
+        cart_total:  total,
+        minutes_ago: Math.floor((Date.now() - new Date(s.entry_time).getTime()) / 60000),
         cart: items.map(i => ({
           name:     i.store_products?.products?.name || 'Unknown',
           quantity: i.quantity,
           price:    i.store_products?.price || 0,
         })),
       };
-    });
+    }));
 
     return res.json({ success: true, sessions: enriched });
 
