@@ -1,8 +1,10 @@
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const db = require('../db');
+const db      = require('../db');
 const { authenticate } = require('../middleware/auth');
+
+const THREE_HOURS = 3 * 60 * 60 * 1000; // 3 hours in ms
 
 // ── POST /api/session/start ──────────────────────────────
 router.post('/start', authenticate, async (req, res) => {
@@ -21,57 +23,63 @@ router.post('/start', authenticate, async (req, res) => {
 
     const storeData = store.rows[0];
 
-    // Check for ANY recent session — reactivate within 24h (industry standard) for this user+store
-    const existing = await db.query(
+    // ── Look for recent ACTIVE or ABANDONED session (SAME STORE, < 3 hours) ──
+    // NEVER reactivate EXPIRED sessions — they are dead
+    const recent = await db.query(
       `SELECT s.*, st.name as store_name
        FROM sessions s
        JOIN stores st ON st.id = s.store_id
-       WHERE s.user_id = $1
-         AND s.store_id = $2
-         AND s.status IN ('active', 'abandoned', 'expired')
-         AND s.entry_time > NOW() - INTERVAL '24 hours'
+       WHERE s.user_id   = $1
+         AND s.store_id  = $2
+         AND s.status    IN ('active', 'abandoned')
+         AND s.entry_time > NOW() - INTERVAL '3 hours'
        ORDER BY s.entry_time DESC
        LIMIT 1`,
       [req.user.id, storeData.id]
     );
 
-    if (existing.rows.length > 0) {
-      const s = existing.rows[0];
-
-      // Resume: set back to active
-      const resumed = await db.query(
+    if (recent.rows.length > 0) {
+      // Session < 3 hours old → REACTIVATE
+      const s = recent.rows[0];
+      const reactivated = await db.query(
         `UPDATE sessions
          SET status = 'active', exit_time = NULL
          WHERE id = $1
          RETURNING *`,
         [s.id]
       );
-
       return res.json({
-        success: true,
-        resumed: true,
-        session: { ...resumed.rows[0], store_name: storeData.name },
-        store: { id: storeData.id, name: storeData.name, city: storeData.city }
+        success:  true,
+        resumed:  true,
+        session:  { ...reactivated.rows[0], store_name: storeData.name },
+        store:    { id: storeData.id, name: storeData.name, city: storeData.city }
       });
     }
 
-    // Check if user has active session at a DIFFERENT store — abandon it
-    const otherStore = await db.query(
-      `SELECT id FROM sessions
-       WHERE user_id = $1 AND status = 'active' AND store_id != $2`,
+    // ── No recent session found → expire any old active sessions first ──
+    // Then create fresh session
+    await db.query(
+      `UPDATE sessions
+       SET status = 'expired', exit_time = NOW(),
+           duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+       WHERE user_id = $1
+         AND store_id = $2
+         AND status IN ('active', 'abandoned')`,
       [req.user.id, storeData.id]
     );
-    if (otherStore.rows.length > 0) {
-      await db.query(
-        `UPDATE sessions
-         SET status = 'abandoned', exit_time = NOW(),
-             duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
-         WHERE id = $1`,
-        [otherStore.rows[0].id]
-      );
-    }
 
-    // Create brand new session
+    // Also abandon any active session at a DIFFERENT store
+    await db.query(
+      `UPDATE sessions
+       SET status = 'abandoned', exit_time = NOW(),
+           duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+       WHERE user_id  = $1
+         AND store_id != $2
+         AND status   = 'active'`,
+      [req.user.id, storeData.id]
+    );
+
+    // Create FRESH session
     const session = await db.query(
       `INSERT INTO sessions (session_code, user_id, store_id, status, entry_time)
        VALUES ($1, $2, $3, 'active', NOW()) RETURNING *`,
@@ -82,7 +90,7 @@ router.post('/start', authenticate, async (req, res) => {
       success: true,
       resumed: false,
       session: { ...session.rows[0], store_name: storeData.name },
-      store: { id: storeData.id, name: storeData.name, city: storeData.city }
+      store:   { id: storeData.id, name: storeData.name, city: storeData.city }
     });
 
   } catch (error) {
@@ -98,7 +106,8 @@ router.get('/current', authenticate, async (req, res) => {
       `SELECT s.*, st.name as store_name
        FROM sessions s
        JOIN stores st ON st.id = s.store_id
-       WHERE s.user_id = $1 AND s.status = 'active'
+       WHERE s.user_id = $1
+         AND s.status  = 'active'
        ORDER BY s.entry_time DESC LIMIT 1`,
       [req.user.id]
     );
@@ -109,18 +118,23 @@ router.get('/current', authenticate, async (req, res) => {
 });
 
 // ── POST /api/session/end ────────────────────────────────
+// reason: 'abandoned' (background) | 'user_exit' (tapped End) | 'expired' (force expire)
 router.post('/end', authenticate, async (req, res) => {
   try {
     const { reason = 'abandoned' } = req.body;
 
+    // user_exit → mark expired so resume banner disappears
+    const newStatus = reason === 'user_exit' ? 'expired'
+                    : reason === 'completed' ? 'completed'
+                    : 'abandoned';
+
     const result = await db.query(
       `UPDATE sessions
-       SET status = $1,
-           exit_time = NOW(),
+       SET status = $1, exit_time = NOW(),
            duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
        WHERE user_id = $2 AND status = 'active'
        RETURNING *`,
-      [reason === 'completed' ? 'completed' : 'abandoned', req.user.id]
+      [newStatus, req.user.id]
     );
 
     if (result.rows.length === 0)
@@ -138,37 +152,44 @@ router.post('/end', authenticate, async (req, res) => {
 router.post('/complete', authenticate, async (req, res) => {
   try {
     const { session_id, total_amount, item_count } = req.body;
-
     const result = await db.query(
       `UPDATE sessions
-       SET status = 'completed',
-           exit_time = NOW(),
-           payment_time = NOW(),
-           total_amount = $1,
-           item_count = $2,
+       SET status = 'completed', exit_time = NOW(), payment_time = NOW(),
+           total_amount = $1, item_count = $2,
            duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
        WHERE id = $3 AND user_id = $4
        RETURNING *`,
       [total_amount || 0, item_count || 0, session_id, req.user.id]
     );
-
     return res.json({ success: true, session: result.rows[0] });
-
   } catch (error) {
     console.error('Session complete error:', error.message);
     return res.status(500).json({ error: 'Could not complete session' });
   }
 });
 
-// ── Auto-expire — runs every 5 mins ─────────────────────
-// Handles app killed case — backend is source of truth
+// ── GET /api/store/:store_id/qr-value ───────────────────
+router.get('/store/:store_id/qr-value', authenticate, async (req, res) => {
+  try {
+    const store = await db.query(
+      'SELECT entry_qr_code, name FROM stores WHERE id = $1 AND is_active = true',
+      [req.params.store_id]
+    );
+    if (store.rows.length === 0)
+      return res.status(404).json({ error: 'Store not found' });
+    return res.json({ success: true, qr_code_value: store.rows[0].entry_qr_code, store_name: store.rows[0].name });
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not get store QR' });
+  }
+});
+
+// ── AUTO-EXPIRE — runs every 5 mins ─────────────────────
 const autoExpire = async () => {
   try {
-    // 1. Abandon sessions with NO cart items after 30 mins
-    //    (user entered store but never scanned anything — likely left)
+    // 1. Expire sessions with NO cart items after 30 mins
     const r1 = await db.query(
       `UPDATE sessions
-       SET status = 'abandoned', exit_time = NOW(),
+       SET status = 'expired', exit_time = NOW(),
            duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
        WHERE status = 'active'
          AND entry_time < NOW() - INTERVAL '30 minutes'
@@ -176,45 +197,23 @@ const autoExpire = async () => {
        RETURNING id`
     );
 
-    // 2. Expire sessions older than 3 hours regardless (app killed mid-shop)
+    // 2. Expire ALL sessions older than 3 hours (regardless of cart)
     const r2 = await db.query(
       `UPDATE sessions
        SET status = 'expired', exit_time = NOW(),
            duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
-       WHERE status = 'active'
+       WHERE status IN ('active', 'abandoned')
          AND entry_time < NOW() - INTERVAL '3 hours'
        RETURNING id`
     );
 
-    if (r1.rows.length > 0) console.log(`Auto-abandoned ${r1.rows.length} empty sessions`);
+    if (r1.rows.length > 0) console.log(`Auto-expired ${r1.rows.length} empty sessions`);
     if (r2.rows.length > 0) console.log(`Auto-expired ${r2.rows.length} old sessions`);
   } catch (e) {
     console.error('Auto-expire error:', e.message);
   }
 };
-setInterval(autoExpire, 5 * 60 * 1000); // every 5 mins
+setInterval(autoExpire, 5 * 60 * 1000);
 autoExpire();
-
-
-// GET /api/store/:store_id/qr-value
-// App calls this to get store QR for session reactivation
-router.get("/store/:store_id/qr-value", authenticate, async (req, res) => {
-  try {
-    const { store_id } = req.params;
-    const store = await db.query(
-      "SELECT entry_qr_code, name FROM stores WHERE id = $1 AND is_active = true",
-      [store_id]
-    );
-    if (store.rows.length === 0)
-      return res.status(404).json({ error: "Store not found" });
-    return res.json({
-      success: true,
-      qr_code_value: store.rows[0].entry_qr_code,
-      store_name: store.rows[0].name
-    });
-  } catch (e) {
-    return res.status(500).json({ error: "Could not get store QR" });
-  }
-});
 
 module.exports = router;
