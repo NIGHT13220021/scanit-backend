@@ -242,7 +242,58 @@ router.get('/history', authenticate, async (req, res) => {
     return res.status(500).json({ error: 'Could not load orders.' });
   }
 });
+// ── ADD THIS ROUTE to your existing order routes file ──
+// GET /api/order/:id — fetch single order with items for receipt
 
+router.get('/:id', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const token_user_id = req.user.id;
+
+    // Get order
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select('id, total, payment_status, razorpay_payment_id, created_at, store_id, stores(name)')
+      .eq('id', id)
+      .eq('user_id', token_user_id)
+      .single();
+
+    if (orderError || !order)
+      return res.status(404).json({ error: 'Order not found' });
+
+    // Get order items
+    const { data: orderItems } = await supabase
+      .from('order_items')
+      .select('quantity, price, store_products(price, products(name, brand, category))')
+      .eq('order_id', id);
+
+    const items = (orderItems || []).map(item => ({
+      name:       item.store_products?.products?.name || 'Item',
+      brand:      item.store_products?.products?.brand || '',
+      category:   item.store_products?.products?.category || '',
+      quantity:   item.quantity,
+      price:      item.price || item.store_products?.price || 0,
+      item_total: (item.price || item.store_products?.price || 0) * item.quantity,
+    }));
+
+    return res.json({
+      success: true,
+      order: {
+        id:                    order.id,
+        total:                 order.total,
+        payment_status:        order.payment_status,
+        razorpay_payment_id:   order.razorpay_payment_id,
+        created_at:            order.created_at,
+        store_name:            order.stores?.name,
+      },
+      items,
+    });
+
+  } catch (error) {
+    console.error('Get order error:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch order' });
+  }
+});
 
 // Auto-fail pending orders older than 30 mins with no payment ID
 const cleanPendingOrders = async () => {
