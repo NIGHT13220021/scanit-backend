@@ -243,4 +243,23 @@ router.get('/history', authenticate, async (req, res) => {
   }
 });
 
+
+// Auto-fail pending orders older than 30 mins with no payment ID
+const cleanPendingOrders = async () => {
+  try {
+    await db.query(
+      `UPDATE orders 
+       SET payment_status = 'failed'
+       WHERE payment_status = 'pending'
+         AND razorpay_payment_id IS NULL
+         AND created_at < NOW() - INTERVAL '30 minutes'`
+    );
+  } catch (e) {
+    console.error('Clean pending orders error:', e.message);
+  }
+};
+setInterval(cleanPendingOrders, 15 * 60 * 1000); // every 15 mins
+cleanPendingOrders();
+
+
 module.exports = router;
