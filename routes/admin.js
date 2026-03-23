@@ -112,13 +112,16 @@ router.post('/login', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// AUTH — FORGOT PASSWORD
+// ════════════════════════════════════════════════════════
+// AUTH — FORGOT PASSWORD (SMS OTP FIXED)
 // ════════════════════════════════════════════════════════
 
 router.post('/forgot-password', async (req, res) => {
   try {
     const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Phone number required.' });
+
+    if (!phone)
+      return res.status(400).json({ error: 'Phone number required.' });
 
     const { data: user, error } = await supabase
       .from('users')
@@ -127,26 +130,46 @@ router.post('/forgot-password', async (req, res) => {
       .in('role', ['store_owner', 'super_admin'])
       .single();
 
-    if (error || !user)
-      return res.json({ success: true, message: 'If this number is registered, an OTP has been sent.' });
+    // Always send success message (security best practice)
+    if (error || !user) {
+      return res.json({
+        success: true,
+        message: 'If this number is registered, an OTP has been sent.'
+      });
+    }
 
-    const otp       = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
 
-    otpStore.set(phone, { otp, expiresAt, userId: user.id, verified: false });
+    otpStore.set(phone, {
+      otp,
+      expiresAt,
+      userId: user.id,
+      verified: false
+    });
 
-    const apiKey  = process.env.TWOFACTOR_API_KEY;
-    const smsUrl  = `https://2factor.in/API/V1/${apiKey}/VOICE/${phone}/${otp}`;
-    const smsRes  = await axios.get(smsUrl);
+    // ✅ FIX: Add country code + AUTOGEN
+    const apiKey = process.env.TWOFACTOR_API_KEY;
+    const formattedPhone = `91${phone}`;
+
+    const smsUrl = `https://2factor.in/API/V1/${apiKey}/SMS/${formattedPhone}/${otp}/AUTOGEN`;
+
+    const smsRes = await axios.get(smsUrl);
     const smsData = smsRes.data;
 
     if (smsData.Status !== 'Success') {
-      console.error('2Factor VOICE OTP error:', smsData);
-      return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
+      console.error('2Factor SMS OTP error:', smsData);
+      return res.status(500).json({
+        error: 'Failed to send OTP. Please try again.'
+      });
     }
 
     console.log(`[DEV] OTP for ${phone}: ${otp}`);
-    return res.json({ success: true, message: 'OTP sent successfully.' });
+
+    return res.json({
+      success: true,
+      message: 'OTP sent successfully.'
+    });
 
   } catch (error) {
     console.error('Forgot password error:', error.message);
@@ -154,75 +177,6 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-router.post('/verify-otp', async (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-    if (!phone || !otp)
-      return res.status(400).json({ error: 'Phone and OTP required.' });
-
-    const record = otpStore.get(phone);
-    if (!record)
-      return res.status(400).json({ error: 'OTP not found. Please request a new one.' });
-
-    if (Date.now() > record.expiresAt) {
-      otpStore.delete(phone);
-      return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
-    }
-
-    if (record.otp !== otp.trim())
-      return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
-
-    otpStore.set(phone, { ...record, verified: true });
-    return res.json({ success: true, message: 'OTP verified successfully.' });
-
-  } catch (error) {
-    console.error('Verify OTP error:', error.message);
-    return res.status(500).json({ error: 'OTP verification failed.' });
-  }
-});
-
-router.post('/reset-password', async (req, res) => {
-  try {
-    const { phone, otp, newPassword } = req.body;
-
-    if (!phone || !otp || !newPassword)
-      return res.status(400).json({ error: 'Phone, OTP and new password are required.' });
-
-    if (newPassword.length < 6)
-      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
-
-    const record = otpStore.get(phone);
-
-    if (!record || !record.verified)
-      return res.status(400).json({ error: 'Please verify OTP first.' });
-
-    if (Date.now() > record.expiresAt) {
-      otpStore.delete(phone);
-      return res.status(400).json({ error: 'OTP has expired. Please start over.' });
-    }
-
-    if (record.otp !== otp.trim())
-      return res.status(400).json({ error: 'Invalid OTP.' });
-
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    const { error } = await supabase
-      .from('users')
-      .update({ admin_password: hashedPassword })
-      .eq('id', record.userId);
-
-    if (error) throw error;
-
-    otpStore.delete(phone);
-    return res.json({ success: true, message: 'Password reset successfully. Please login.' });
-
-  } catch (error) {
-    console.error('Reset password error:', error.message);
-    return res.status(500).json({ error: 'Failed to reset password.' });
-  }
-});
-
-// ════════════════════════════════════════════════════════
 // STORE OWNER — STATS
 // ════════════════════════════════════════════════════════
 

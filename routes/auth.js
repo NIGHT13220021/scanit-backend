@@ -7,9 +7,12 @@ const axios   = require('axios');
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
 const send2FactorOTP = async (phone, otp) => {
+  const formattedPhone = `91${phone}`; // ✅ add country code
+
   const response = await axios.get(
-    `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${phone}/${otp}/AUTOGEN`
+    `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${formattedPhone}/${otp}/AUTOGEN`
   );
+
   console.log('2Factor response:', response.data);
   return response.data;
 };
@@ -22,7 +25,7 @@ router.post('/send-otp', async (req, res) => {
   }
   try {
     const otp     = generateOTP();
-    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    const expires = new Date(Date.now() + 5 * 60 * 1000); // ✅ 5 minutes
 
     await db.query(
       `INSERT INTO otps (phone, otp, expires_at)
