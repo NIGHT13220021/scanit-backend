@@ -6,14 +6,20 @@ const axios   = require('axios');
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-const send2FactorOTP = async (phone, otp) => {
-  const formattedPhone = `91${phone}`; // ✅ add country code
-
+const sendFast2SMSOTP = async (phone, otp) => {
   const response = await axios.get(
-    `https://2factor.in/API/V1/${process.env.TWOFACTOR_API_KEY}/SMS/${formattedPhone}/${otp}/AUTOGEN`
+    `https://www.fast2sms.com/dev/bulkV2`,
+    {
+      params: {
+        authorization: process.env.FAST2SMS_API_KEY,
+        route: 'otp',
+        variables_values: otp,
+        flash: 0,
+        numbers: phone
+      }
+    }
   );
-
-  console.log('2Factor response:', response.data);
+  console.log('Fast2SMS response:', response.data);
   return response.data;
 };
 
@@ -25,7 +31,7 @@ router.post('/send-otp', async (req, res) => {
   }
   try {
     const otp     = generateOTP();
-    const expires = new Date(Date.now() + 5 * 60 * 1000); // ✅ 5 minutes
+    const expires = new Date(Date.now() + 5 * 60 * 1000);
 
     await db.query(
       `INSERT INTO otps (phone, otp, expires_at)
@@ -36,9 +42,9 @@ router.post('/send-otp', async (req, res) => {
 
     let smsSent = false;
     try {
-      await send2FactorOTP(phone, otp);
+      await sendFast2SMSOTP(phone, otp);
       smsSent = true;
-      console.log(`✅ OTP sent via 2Factor to ${phone}`);
+      console.log(`✅ OTP sent via Fast2SMS to ${phone}`);
     } catch (smsError) {
       console.log(`⚠️ SMS failed: ${smsError.message}`);
       console.log(`📱 DEV OTP for ${phone}: ${otp}`);
@@ -47,7 +53,6 @@ router.post('/send-otp', async (req, res) => {
     res.json({
       success: true,
       message: smsSent ? 'OTP sent to your phone' : 'OTP ready',
-      // Only expose OTP in development
       otp: process.env.NODE_ENV !== 'production' ? otp : undefined
     });
 
