@@ -22,7 +22,7 @@ app.use('/api/session', authenticate, require('./routes/session'));
 app.use('/api/cart',    authenticate, require('./routes/cart'));
 app.use('/api/order',   authenticate, require('./routes/order'));
 app.use('/api/exit',    authenticate, require('./routes/exit'));
-app.use('/api/admin',   authenticate, require('./routes/admin'));
+app.use('/api/admin',   require('./routes/admin'));
 
 // ── Health check ──
 app.get('/health', (req, res) => {
