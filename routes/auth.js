@@ -47,6 +47,7 @@ router.post('/send-otp', async (req, res) => {
       console.log(`✅ OTP sent via Fast2SMS to ${phone}`);
     } catch (smsError) {
       console.log(`⚠️ SMS failed: ${smsError.message}`);
+      console.log(`⚠️ SMS error details:`, smsError.response?.data);
       console.log(`📱 DEV OTP for ${phone}: ${otp}`);
     }
 
