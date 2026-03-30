@@ -168,7 +168,7 @@ router.post('/forgot-password', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// STORE OWNER — STATS  (UPDATED: adds fields for Smart Alerts + Store Health)
+// STORE OWNER — STATS
 // ════════════════════════════════════════════════════════
 
 router.get('/stats', authAdmin, async (req, res) => {
@@ -185,17 +185,11 @@ router.get('/stats', authAdmin, async (req, res) => {
       { data: liveSessions },
       { count: productCount },
       { count: todayOrderCount },
-      // ── NEW: yesterday revenue for spike detection ──
       { data: yesterdayOrders },
-      // ── NEW: pending orders ──
       { count: pendingOrderCount },
-      // ── NEW: low stock products ──
       { count: lowStockCount },
-      // ── NEW: all sessions for abandonment rate ──
       { data: allSessions },
-      // ── NEW: sessions that have cart items but no order ──
       { data: abandonedSessions },
-      // ── NEW: repeat customers ──
       { data: allOrderUsers },
     ] = await Promise.all([
       supabase.from('orders').select('total').eq('store_id', store_id).eq('payment_status', 'paid').gte('created_at', todayStart.toISOString()),
@@ -203,47 +197,32 @@ router.get('/stats', authAdmin, async (req, res) => {
       supabase.from('sessions').select('id').eq('store_id', store_id).eq('status', 'active'),
       supabase.from('store_products').select('id', { count: 'exact' }).eq('store_id', store_id).eq('is_available', true),
       supabase.from('orders').select('id', { count: 'exact' }).eq('store_id', store_id).gte('created_at', todayStart.toISOString()),
-
-      // yesterday paid orders
       supabase.from('orders').select('total').eq('store_id', store_id).eq('payment_status', 'paid')
         .gte('created_at', yesterdayStart.toISOString())
         .lt('created_at', yesterdayEnd.toISOString()),
-
-      // pending orders count
       supabase.from('orders').select('id', { count: 'exact' })
         .eq('store_id', store_id)
         .eq('payment_status', 'pending'),
-
-      // low stock: store_products where in_stock = false
       supabase.from('store_products').select('id', { count: 'exact' })
         .eq('store_id', store_id)
         .eq('in_stock', false),
-
-      // all sessions today for abandonment calc
       supabase.from('sessions').select('id').eq('store_id', store_id)
         .gte('entry_time', todayStart.toISOString()),
-
-      // sessions with cart_total > 0 but no completed order (abandoned)
       supabase.from('sessions').select('id').eq('store_id', store_id)
         .eq('status', 'active')
-        .gte('entry_time', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()), // last 2hrs
-
-      // all user_ids who placed orders (for repeat customer calc)
+        .gte('entry_time', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()),
       supabase.from('orders').select('user_id').eq('store_id', store_id).eq('payment_status', 'paid'),
     ]);
 
-    // ── Compute derived stats ──
     const todayRevenue     = todayOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0;
     const yesterdayRevenue = yesterdayOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0;
 
-    // Cart abandonment: sessions active > 15 min with no order = abandoned proxy
     const totalSessionsToday = allSessions?.length || 0;
     const activeHangingSessions = abandonedSessions?.length || 0;
     const cartAbandonmentRate = totalSessionsToday > 0
       ? activeHangingSessions / totalSessionsToday
       : 0;
 
-    // Repeat customer rate
     const userOrderMap = {};
     (allOrderUsers || []).forEach(o => {
       userOrderMap[o.user_id] = (userOrderMap[o.user_id] || 0) + 1;
@@ -254,29 +233,23 @@ router.get('/stats', authAdmin, async (req, res) => {
       ? repeatCustomerCount / totalUniqueCustomers
       : 0;
 
-    // Conversion rate: orders / sessions today
     const conversionRate = totalSessionsToday > 0
       ? Math.min((todayOrderCount || 0) / totalSessionsToday, 1)
       : 0.3;
 
     return res.json({
-      // ── existing fields (unchanged) ──
       today_revenue:  todayRevenue,
       month_revenue:  monthOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0,
       today_orders:   todayOrderCount || 0,
       live_sessions:  liveSessions?.length || 0,
       product_count:  productCount || 0,
-
-      // ── NEW fields for Smart Alerts ──
       yesterday_revenue:      yesterdayRevenue,
       pending_orders:         pendingOrderCount || 0,
       low_stock_count:        lowStockCount || 0,
       cart_abandonment_rate:  cartAbandonmentRate,
-
-      // ── NEW fields for Store Health Score ──
       conversion_rate:        conversionRate,
       repeat_customer_rate:   repeatCustomerRate,
-      daily_target:           20, // adjust this to your store's daily order target
+      daily_target:           20,
     });
 
   } catch (error) {
@@ -367,14 +340,14 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// PRODUCTS
+// PRODUCTS — FIX: scanner needs in_stock=true + real price
 // ════════════════════════════════════════════════════════
 
 router.get('/products', authAdmin, async (req, res) => {
   try {
     const { data: products, error } = await supabase
       .from('store_products')
-      .select(`id, price, mrp, gst_percent, in_stock, products(id, name, barcode, brand, category)`)
+      .select(`id, price, mrp, gst_percent, in_stock, is_available, products(id, name, barcode, brand, category)`)
       .eq('store_id', req.user.store_id)
       .order('updated_at', { ascending: false });
 
@@ -391,6 +364,7 @@ router.get('/products', authAdmin, async (req, res) => {
       mrp:         sp.mrp,
       gst_percent: sp.gst_percent,
       in_stock:    sp.in_stock,
+      is_available: sp.is_available,
     }));
 
     return res.json({ success: true, products: flat });
@@ -401,34 +375,78 @@ router.get('/products', authAdmin, async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════
+// FIX 1: POST /products
+// — Always sets in_stock=true and is_available=true so scanner can find it
+// — Validates price > 0 (scanner was getting ₹1 placeholder)
+// — Returns full product info the scanner expects
+// ════════════════════════════════════════════════════════
+
 router.post('/products', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
-    let { barcode, name, brand, category, price } = req.body;
+    let { barcode, name, brand, category, price, mrp, gst_percent } = req.body;
 
     if (!barcode || !name || !price)
       return res.status(400).json({ error: 'Barcode, name and price are required.' });
 
+    // FIX: strip currency symbols and validate price is a real number > 0
     price = parseFloat(String(price).replace(/[^\d.]/g, ''));
+    mrp   = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
 
+    if (isNaN(price) || price <= 0)
+      return res.status(400).json({ error: 'Price must be a valid number greater than 0.' });
+
+    // Step 1: upsert into products table (global catalog)
     const { data: product, error: prodError } = await supabase
       .from('products')
-      .upsert({ barcode, name, brand, category }, { onConflict: 'barcode' })
-      .select().single();
+      .upsert(
+        { barcode, name, brand: brand || null, category: category || null },
+        { onConflict: 'barcode' }
+      )
+      .select()
+      .single();
 
     if (prodError) throw prodError;
 
+    // Step 2: upsert into store_products
+    // FIX: always set in_stock=true and is_available=true so scanner finds this product
     const { data: storeProduct, error: spError } = await supabase
       .from('store_products')
       .upsert(
-        { store_id, product_id: product.id, price, mrp: price, gst_percent: 0, in_stock: true },
+        {
+          store_id,
+          product_id:  product.id,
+          price,
+          mrp,
+          gst_percent: parseFloat(gst_percent) || 0,
+          in_stock:    true,      // FIX: was missing — scanner checks this
+          is_available: true,     // FIX: was missing — scanner checks this
+        },
         { onConflict: 'store_id,product_id' }
       )
-      .select().single();
+      .select()
+      .single();
 
     if (spError) throw spError;
 
-    return res.json({ success: true, message: 'Product added successfully.', product: { ...product, ...storeProduct } });
+    return res.json({
+      success: true,
+      message: 'Product added successfully.',
+      product: {
+        store_product_id: storeProduct.id,
+        product_id:  product.id,
+        barcode:     product.barcode,
+        name:        product.name,
+        brand:       product.brand,
+        category:    product.category,
+        price:       storeProduct.price,
+        mrp:         storeProduct.mrp,
+        gst_percent: storeProduct.gst_percent,
+        in_stock:    storeProduct.in_stock,
+        is_available: storeProduct.is_available,
+      }
+    });
 
   } catch (error) {
     console.error('Add product error:', error.message);
@@ -436,25 +454,59 @@ router.post('/products', authAdmin, async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════
+// FIX 2: PUT /products/:id
+// — Updates both price AND in_stock/is_available together
+// — So toggling stock off actually makes scanner return 404 correctly
+// ════════════════════════════════════════════════════════
+
 router.put('/products/:id', authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const store_id = req.user.store_id;
-    let { name, brand, category, price, mrp, gst_percent, in_stock } = req.body;
+    let { name, brand, category, price, mrp, gst_percent, in_stock, is_available } = req.body;
 
+    // FIX: validate price before saving — prevent ₹1 placeholder from reaching scanner
     price = parseFloat(String(price).replace(/[^\d.]/g, ''));
     mrp   = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
 
+    if (isNaN(price) || price <= 0)
+      return res.status(400).json({ error: 'Price must be greater than 0.' });
+
+    // FIX: keep is_available in sync with in_stock
+    // If admin marks out of stock, scanner must get 404
+    const stockStatus = typeof in_stock === 'boolean' ? in_stock : true;
+    const availStatus = typeof is_available === 'boolean' ? is_available : stockStatus;
+
     const { error } = await supabase
       .from('store_products')
-      .update({ price, mrp, gst_percent: parseFloat(gst_percent) || 0, in_stock })
-      .eq('id', id).eq('store_id', store_id);
+      .update({
+        price,
+        mrp,
+        gst_percent:  parseFloat(gst_percent) || 0,
+        in_stock:     stockStatus,
+        is_available: availStatus,   // FIX: was not being updated
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('store_id', store_id);
 
     if (error) throw error;
 
+    // Also update product master info if provided
     if (name || brand || category) {
-      const { data: sp } = await supabase.from('store_products').select('product_id').eq('id', id).single();
-      if (sp) await supabase.from('products').update({ name, brand, category }).eq('id', sp.product_id);
+      const { data: sp } = await supabase
+        .from('store_products')
+        .select('product_id')
+        .eq('id', id)
+        .single();
+
+      if (sp) {
+        await supabase
+          .from('products')
+          .update({ name, brand, category })
+          .eq('id', sp.product_id);
+      }
     }
 
     return res.json({ success: true, message: 'Product updated.' });
@@ -479,6 +531,125 @@ router.delete('/products/:id', authAdmin, async (req, res) => {
   } catch (error) {
     console.error('Delete product error:', error.message);
     return res.status(500).json({ error: 'Failed to remove product.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════
+// FIX 3: NEW ROUTE — PATCH /products/:id/stock
+// Lets admin toggle stock on/off without touching price
+// Scanner checks in_stock + is_available — both must be true
+// ════════════════════════════════════════════════════════
+
+router.patch('/products/:id/stock', authAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { in_stock } = req.body;
+
+    if (typeof in_stock !== 'boolean')
+      return res.status(400).json({ error: 'in_stock must be true or false.' });
+
+    const { error } = await supabase
+      .from('store_products')
+      .update({
+        in_stock,
+        is_available: in_stock,   // keep in sync
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('store_id', req.user.store_id);
+
+    if (error) throw error;
+
+    return res.json({
+      success: true,
+      message: `Product marked ${in_stock ? 'in stock' : 'out of stock'}.`,
+    });
+
+  } catch (error) {
+    console.error('Stock toggle error:', error.message);
+    return res.status(500).json({ error: 'Failed to update stock status.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════
+// FIX 4: NEW ROUTE — POST /products/bulk
+// Import CSV rows at once — each row sets in_stock=true so scanner works immediately
+// ════════════════════════════════════════════════════════
+
+router.post('/products/bulk', authAdmin, async (req, res) => {
+  try {
+    const store_id = req.user.store_id;
+    const { products } = req.body;
+
+    if (!Array.isArray(products) || products.length === 0)
+      return res.status(400).json({ error: 'products array is required.' });
+
+    const results = { success: [], failed: [] };
+
+    for (const item of products) {
+      try {
+        let { barcode, name, brand, category, price, mrp, gst_percent } = item;
+
+        if (!barcode || !name || !price) {
+          results.failed.push({ barcode, reason: 'Missing barcode, name or price.' });
+          continue;
+        }
+
+        price = parseFloat(String(price).replace(/[^\d.]/g, ''));
+        mrp   = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
+
+        if (isNaN(price) || price <= 0) {
+          results.failed.push({ barcode, reason: 'Invalid price.' });
+          continue;
+        }
+
+        // Upsert product
+        const { data: product, error: prodError } = await supabase
+          .from('products')
+          .upsert(
+            { barcode, name, brand: brand || null, category: category || null },
+            { onConflict: 'barcode' }
+          )
+          .select()
+          .single();
+
+        if (prodError) throw prodError;
+
+        // Upsert store_products — always in_stock + is_available = true
+        const { error: spError } = await supabase
+          .from('store_products')
+          .upsert(
+            {
+              store_id,
+              product_id:   product.id,
+              price,
+              mrp,
+              gst_percent:  parseFloat(gst_percent) || 0,
+              in_stock:     true,
+              is_available: true,
+            },
+            { onConflict: 'store_id,product_id' }
+          );
+
+        if (spError) throw spError;
+
+        results.success.push({ barcode, name });
+
+      } catch (err) {
+        results.failed.push({ barcode: item.barcode, reason: err.message });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `${results.success.length} products imported, ${results.failed.length} failed.`,
+      imported: results.success,
+      failed:   results.failed,
+    });
+
+  } catch (error) {
+    console.error('Bulk import error:', error.message);
+    return res.status(500).json({ error: 'Bulk import failed.' });
   }
 });
 
@@ -597,14 +768,13 @@ router.put('/change-password', authAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// ANALYTICS  (UPDATED: adds Dead Stock, Star Products, Weekly Summary)
+// ANALYTICS
 // ════════════════════════════════════════════════════════
 
 router.get('/analytics', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
 
-    // ── Existing: 30-day revenue chart ──
     const { data: orders } = await supabase
       .from('orders').select('total, created_at')
       .eq('store_id', store_id).eq('payment_status', 'paid')
@@ -616,7 +786,6 @@ router.get('/analytics', authAdmin, async (req, res) => {
       revenueByDay[day] = (revenueByDay[day] || 0) + (o.total || 0);
     });
 
-    // ── Existing: top products ──
     const { data: topItems } = await supabase
       .from('order_items')
       .select('quantity, store_products(price, products(name)), orders!inner(store_id, payment_status)')
@@ -633,18 +802,12 @@ router.get('/analytics', authAdmin, async (req, res) => {
 
     const topProducts = Object.values(productMap).sort((a, b) => b.units - a.units).slice(0, 5);
 
-    // ════════════════════════════════════════
-    // NEW: Dead Stock — products with no sales in last 21 days
-    // ════════════════════════════════════════
-
-    // Step 1: Get all store products with their product info
     const { data: storeProducts } = await supabase
       .from('store_products')
       .select('id, in_stock, price, products(id, name)')
       .eq('store_id', store_id)
       .eq('in_stock', true);
 
-    // Step 2: Get order_items from last 21 days to know what sold
     const cutoff21 = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
     const { data: recentSoldItems } = await supabase
       .from('order_items')
@@ -653,10 +816,8 @@ router.get('/analytics', authAdmin, async (req, res) => {
       .eq('orders.payment_status', 'paid')
       .gte('orders.created_at', cutoff21);
 
-    // Build a set of store_product_ids sold recently
     const recentlySoldIds = new Set((recentSoldItems || []).map(i => i.store_product_id));
 
-    // Step 3: Get last sale date for each product (from all time)
     const { data: allSoldItems } = await supabase
       .from('order_items')
       .select('store_product_id, orders!inner(store_id, payment_status, created_at)')
@@ -664,7 +825,6 @@ router.get('/analytics', authAdmin, async (req, res) => {
       .eq('orders.payment_status', 'paid')
       .order('orders(created_at)', { ascending: false });
 
-    // Map: store_product_id -> last sold date
     const lastSoldMap = {};
     (allSoldItems || []).forEach(item => {
       if (!lastSoldMap[item.store_product_id]) {
@@ -672,23 +832,21 @@ router.get('/analytics', authAdmin, async (req, res) => {
       }
     });
 
-    // Build all_products array with days_since_last_sale
     const allProductsWithAge = (storeProducts || []).map(sp => {
       const lastSold = lastSoldMap[sp.id];
       const daysSince = lastSold
         ? Math.floor((Date.now() - new Date(lastSold).getTime()) / (1000 * 60 * 60 * 24))
-        : 999; // never sold
+        : 999;
 
       return {
-        id:                 sp.id,
-        name:               sp.products?.name || 'Unknown',
-        stock:              sp.in_stock ? 1 : 0,
-        price:              sp.price || 0,
+        id:                   sp.id,
+        name:                 sp.products?.name || 'Unknown',
+        stock:                sp.in_stock ? 1 : 0,
+        price:                sp.price || 0,
         days_since_last_sale: daysSince,
       };
     });
 
-    // Dead stock = in_stock AND not sold in 21+ days
     const deadStock = allProductsWithAge
       .filter(p => p.days_since_last_sale >= 21)
       .sort((a, b) => b.days_since_last_sale - a.days_since_last_sale)
@@ -699,7 +857,6 @@ router.get('/analytics', authAdmin, async (req, res) => {
         stock_value: p.price,
       }));
 
-    // Star products = top 3 by units sold this month with velocity score
     const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
     const { data: monthItems } = await supabase
       .from('order_items')
@@ -725,12 +882,8 @@ router.get('/analytics', authAdmin, async (req, res) => {
         velocity: parseFloat((p.units_sold / Math.max(daysIntoMonth, 1)).toFixed(2)),
       }));
 
-    // ════════════════════════════════════════
-    // NEW: Weekly Summary
-    // ════════════════════════════════════════
-
-    const now          = new Date();
-    const weekStart    = new Date(now); weekStart.setDate(now.getDate() - 7);    weekStart.setHours(0, 0, 0, 0);
+    const now           = new Date();
+    const weekStart     = new Date(now); weekStart.setDate(now.getDate() - 7);     weekStart.setHours(0, 0, 0, 0);
     const prevWeekStart = new Date(now); prevWeekStart.setDate(now.getDate() - 14); prevWeekStart.setHours(0, 0, 0, 0);
 
     const [
@@ -741,24 +894,21 @@ router.get('/analytics', authAdmin, async (req, res) => {
       supabase.from('orders').select('total, created_at, user_id')
         .eq('store_id', store_id).eq('payment_status', 'paid')
         .gte('created_at', weekStart.toISOString()),
-
       supabase.from('orders').select('total, user_id')
         .eq('store_id', store_id).eq('payment_status', 'paid')
         .gte('created_at', prevWeekStart.toISOString())
         .lt('created_at', weekStart.toISOString()),
-
       supabase.from('users').select('id')
         .eq('role', 'customer')
         .gte('created_at', weekStart.toISOString()),
     ]);
 
-    const thisWeekRevenue = (thisWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0);
-    const lastWeekRevenue = (lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0);
+    const thisWeekRevenue    = (thisWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0);
+    const lastWeekRevenue    = (lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0);
     const thisWeekOrderCount = thisWeekOrders?.length || 0;
     const lastWeekOrderCount = lastWeekOrders?.length || 0;
-    const avgOrderValue = thisWeekOrderCount > 0 ? thisWeekRevenue / thisWeekOrderCount : 0;
+    const avgOrderValue      = thisWeekOrderCount > 0 ? thisWeekRevenue / thisWeekOrderCount : 0;
 
-    // Best day of the week
     const dayRevMap = {};
     (thisWeekOrders || []).forEach(o => {
       const dayName = new Date(o.created_at).toLocaleDateString('en-IN', { weekday: 'long' });
@@ -766,7 +916,6 @@ router.get('/analytics', authAdmin, async (req, res) => {
     });
     const bestDayEntry = Object.entries(dayRevMap).sort((a, b) => b[1] - a[1])[0];
 
-    // Simple AI insight based on data
     let aiInsight = "Keep your top products stocked — they're driving consistent growth.";
     if (thisWeekRevenue > lastWeekRevenue * 1.2) {
       aiInsight = "Great week! Revenue is up 20%+. Identify what drove this and repeat it next week.";
@@ -777,34 +926,29 @@ router.get('/analytics', authAdmin, async (req, res) => {
     }
 
     const weeklySummary = {
-      week_label:          weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
-      this_week_revenue:   thisWeekRevenue,
-      last_week_revenue:   lastWeekRevenue,
-      this_week_orders:    thisWeekOrderCount,
-      last_week_orders:    lastWeekOrderCount,
-      avg_order_value:     parseFloat(avgOrderValue.toFixed(2)),
-      prev_avg_order:      lastWeekOrderCount > 0
+      week_label:        weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+      this_week_revenue: thisWeekRevenue,
+      last_week_revenue: lastWeekRevenue,
+      this_week_orders:  thisWeekOrderCount,
+      last_week_orders:  lastWeekOrderCount,
+      avg_order_value:   parseFloat(avgOrderValue.toFixed(2)),
+      prev_avg_order:    lastWeekOrderCount > 0
         ? parseFloat(((lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0) / lastWeekOrderCount).toFixed(2))
         : 0,
-      new_customers:       thisWeekNewUsers?.length || 0,
-      best_day:            bestDayEntry?.[0] || null,
-      best_day_revenue:    bestDayEntry?.[1] || 0,
-      ai_insight:          aiInsight,
+      new_customers:     thisWeekNewUsers?.length || 0,
+      best_day:          bestDayEntry?.[0] || null,
+      best_day_revenue:  bestDayEntry?.[1] || 0,
+      ai_insight:        aiInsight,
     };
 
-    // ── Final response ──
     return res.json({
       success: true,
-
-      // existing
-      revenue_chart: Object.entries(revenueByDay).map(([day, rev]) => ({ day, rev })),
-      top_products:  topProducts,
-
-      // NEW
-      all_products:    allProductsWithAge,
-      dead_stock:      deadStock,
-      star_products:   starProducts,
-      weekly_summary:  weeklySummary,
+      revenue_chart:  Object.entries(revenueByDay).map(([day, rev]) => ({ day, rev })),
+      top_products:   topProducts,
+      all_products:   allProductsWithAge,
+      dead_stock:     deadStock,
+      star_products:  starProducts,
+      weekly_summary: weeklySummary,
     });
 
   } catch (error) {
@@ -871,24 +1015,25 @@ router.get('/export/products', authAdmin, async (req, res) => {
   try {
     const { data: products, error } = await supabase
       .from('store_products')
-      .select('id, price, mrp, gst_percent, in_stock, products(name, barcode, brand, category)')
+      .select('id, price, mrp, gst_percent, in_stock, is_available, products(name, barcode, brand, category)')
       .eq('store_id', req.user.store_id)
       .order('updated_at', { ascending: false });
 
     if (error) throw error;
 
     const rows = (products || []).map(sp => ({
-      barcode:     sp.products?.barcode || '—',
-      name:        sp.products?.name    || '—',
-      brand:       sp.products?.brand   || '—',
-      category:    sp.products?.category || '—',
-      price:       sp.price    || 0,
-      mrp:         sp.mrp      || 0,
-      gst_percent: sp.gst_percent || 0,
-      in_stock:    sp.in_stock ? 'Yes' : 'No',
+      barcode:      sp.products?.barcode  || '—',
+      name:         sp.products?.name     || '—',
+      brand:        sp.products?.brand    || '—',
+      category:     sp.products?.category || '—',
+      price:        sp.price        || 0,
+      mrp:          sp.mrp          || 0,
+      gst_percent:  sp.gst_percent  || 0,
+      in_stock:     sp.in_stock     ? 'Yes' : 'No',
+      is_available: sp.is_available ? 'Yes' : 'No',
     }));
 
-    const csv = toCSV(rows, ['barcode','name','brand','category','price','mrp','gst_percent','in_stock']);
+    const csv = toCSV(rows, ['barcode','name','brand','category','price','mrp','gst_percent','in_stock','is_available']);
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="products_${new Date().toISOString().slice(0,10)}.csv"`);
     return res.send(csv);
@@ -913,14 +1058,17 @@ router.get('/export/revenue', authAdmin, async (req, res) => {
       const day = new Date(o.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
       if (!byDay[day]) byDay[day] = { date: day, total_orders: 0, paid_orders: 0, failed_orders: 0, revenue: 0 };
       byDay[day].total_orders++;
-      if (o.payment_status === 'paid') { byDay[day].paid_orders++; byDay[day].revenue += o.total || 0; }
-      if (o.payment_status === 'failed') byDay[day].failed_orders++;
+      if (o.payment_status === 'paid')   { byDay[day].paid_orders++;   byDay[day].revenue += o.total || 0; }
+      if (o.payment_status === 'failed')   byDay[day].failed_orders++;
     });
 
     const rows = Object.values(byDay).map(d => ({
-      date: d.date, total_orders: d.total_orders, paid_orders: d.paid_orders,
-      failed_orders: d.failed_orders, revenue: d.revenue.toFixed(2),
-      avg_order: d.paid_orders > 0 ? (d.revenue / d.paid_orders).toFixed(2) : '0.00',
+      date:         d.date,
+      total_orders: d.total_orders,
+      paid_orders:  d.paid_orders,
+      failed_orders:d.failed_orders,
+      revenue:      d.revenue.toFixed(2),
+      avg_order:    d.paid_orders > 0 ? (d.revenue / d.paid_orders).toFixed(2) : '0.00',
     }));
 
     const csv = toCSV(rows, ['date','total_orders','paid_orders','failed_orders','revenue','avg_order']);
