@@ -129,27 +129,19 @@ router.post('/forgot-password', async (req, res) => {
       .single();
 
     if (error || !user) {
-      return res.json({
-        success: true,
-        message: 'If this number is registered, an OTP has been sent.'
-      });
+      return res.json({ success: true, message: 'If this number is registered, an OTP has been sent.' });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp       = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = Date.now() + 10 * 60 * 1000;
 
-    otpStore.set(phone, {
-      otp,
-      expiresAt,
-      userId: user.id,
-      verified: false
-    });
+    otpStore.set(phone, { otp, expiresAt, userId: user.id, verified: false });
 
-    const apiKey = process.env.TWOFACTOR_API_KEY;
+    const apiKey         = process.env.TWOFACTOR_API_KEY;
     const formattedPhone = `91${phone}`;
-    const smsUrl = `https://2factor.in/API/V1/${apiKey}/SMS/${formattedPhone}/${otp}/AUTOGEN`;
+    const smsUrl         = `https://2factor.in/API/V1/${apiKey}/SMS/${formattedPhone}/${otp}/AUTOGEN`;
 
-    const smsRes = await axios.get(smsUrl);
+    const smsRes  = await axios.get(smsUrl);
     const smsData = smsRes.data;
 
     if (smsData.Status !== 'Success') {
@@ -158,7 +150,6 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     console.log(`[DEV] OTP for ${phone}: ${otp}`);
-
     return res.json({ success: true, message: 'OTP sent successfully.' });
 
   } catch (error) {
@@ -173,9 +164,9 @@ router.post('/forgot-password', async (req, res) => {
 
 router.get('/stats', authAdmin, async (req, res) => {
   try {
-    const store_id   = req.user.store_id;
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const store_id       = req.user.store_id;
+    const todayStart     = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const monthStart     = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
     const yesterdayStart = new Date(); yesterdayStart.setDate(yesterdayStart.getDate() - 1); yesterdayStart.setHours(0, 0, 0, 0);
     const yesterdayEnd   = new Date(); yesterdayEnd.setHours(0, 0, 0, 0);
 
@@ -200,16 +191,10 @@ router.get('/stats', authAdmin, async (req, res) => {
       supabase.from('orders').select('total').eq('store_id', store_id).eq('payment_status', 'paid')
         .gte('created_at', yesterdayStart.toISOString())
         .lt('created_at', yesterdayEnd.toISOString()),
-      supabase.from('orders').select('id', { count: 'exact' })
-        .eq('store_id', store_id)
-        .eq('payment_status', 'pending'),
-      supabase.from('store_products').select('id', { count: 'exact' })
-        .eq('store_id', store_id)
-        .eq('in_stock', false),
-      supabase.from('sessions').select('id').eq('store_id', store_id)
-        .gte('entry_time', todayStart.toISOString()),
-      supabase.from('sessions').select('id').eq('store_id', store_id)
-        .eq('status', 'active')
+      supabase.from('orders').select('id', { count: 'exact' }).eq('store_id', store_id).eq('payment_status', 'pending'),
+      supabase.from('store_products').select('id', { count: 'exact' }).eq('store_id', store_id).eq('in_stock', false),
+      supabase.from('sessions').select('id').eq('store_id', store_id).gte('entry_time', todayStart.toISOString()),
+      supabase.from('sessions').select('id').eq('store_id', store_id).eq('status', 'active')
         .gte('entry_time', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()),
       supabase.from('orders').select('user_id').eq('store_id', store_id).eq('payment_status', 'paid'),
     ]);
@@ -217,39 +202,32 @@ router.get('/stats', authAdmin, async (req, res) => {
     const todayRevenue     = todayOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0;
     const yesterdayRevenue = yesterdayOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0;
 
-    const totalSessionsToday = allSessions?.length || 0;
+    const totalSessionsToday    = allSessions?.length || 0;
     const activeHangingSessions = abandonedSessions?.length || 0;
-    const cartAbandonmentRate = totalSessionsToday > 0
-      ? activeHangingSessions / totalSessionsToday
-      : 0;
+    const cartAbandonmentRate   = totalSessionsToday > 0 ? activeHangingSessions / totalSessionsToday : 0;
 
     const userOrderMap = {};
     (allOrderUsers || []).forEach(o => {
       userOrderMap[o.user_id] = (userOrderMap[o.user_id] || 0) + 1;
     });
-    const totalUniqueCustomers  = Object.keys(userOrderMap).length;
-    const repeatCustomerCount   = Object.values(userOrderMap).filter(c => c > 1).length;
-    const repeatCustomerRate    = totalUniqueCustomers > 0
-      ? repeatCustomerCount / totalUniqueCustomers
-      : 0;
-
-    const conversionRate = totalSessionsToday > 0
-      ? Math.min((todayOrderCount || 0) / totalSessionsToday, 1)
-      : 0.3;
+    const totalUniqueCustomers = Object.keys(userOrderMap).length;
+    const repeatCustomerCount  = Object.values(userOrderMap).filter(c => c > 1).length;
+    const repeatCustomerRate   = totalUniqueCustomers > 0 ? repeatCustomerCount / totalUniqueCustomers : 0;
+    const conversionRate       = totalSessionsToday > 0 ? Math.min((todayOrderCount || 0) / totalSessionsToday, 1) : 0.3;
 
     return res.json({
-      today_revenue:  todayRevenue,
-      month_revenue:  monthOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0,
-      today_orders:   todayOrderCount || 0,
-      live_sessions:  liveSessions?.length || 0,
-      product_count:  productCount || 0,
-      yesterday_revenue:      yesterdayRevenue,
-      pending_orders:         pendingOrderCount || 0,
-      low_stock_count:        lowStockCount || 0,
-      cart_abandonment_rate:  cartAbandonmentRate,
-      conversion_rate:        conversionRate,
-      repeat_customer_rate:   repeatCustomerRate,
-      daily_target:           20,
+      today_revenue:         todayRevenue,
+      month_revenue:         monthOrders?.reduce((s, o) => s + (o.total || 0), 0) || 0,
+      today_orders:          todayOrderCount || 0,
+      live_sessions:         liveSessions?.length || 0,
+      product_count:         productCount || 0,
+      yesterday_revenue:     yesterdayRevenue,
+      pending_orders:        pendingOrderCount || 0,
+      low_stock_count:       lowStockCount || 0,
+      cart_abandonment_rate: cartAbandonmentRate,
+      conversion_rate:       conversionRate,
+      repeat_customer_rate:  repeatCustomerRate,
+      daily_target:          20,
     });
 
   } catch (error) {
@@ -340,7 +318,7 @@ router.get('/sessions/live', authAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
-// PRODUCTS — FIX: scanner needs in_stock=true + real price
+// PRODUCTS
 // ════════════════════════════════════════════════════════
 
 router.get('/products', authAdmin, async (req, res) => {
@@ -355,15 +333,15 @@ router.get('/products', authAdmin, async (req, res) => {
 
     const flat = (products || []).map(sp => ({
       store_product_id: sp.id,
-      product_id:  sp.products?.id,
-      name:        sp.products?.name,
-      barcode:     sp.products?.barcode,
-      brand:       sp.products?.brand,
-      category:    sp.products?.category,
-      price:       sp.price,
-      mrp:         sp.mrp,
-      gst_percent: sp.gst_percent,
-      in_stock:    sp.in_stock,
+      product_id:   sp.products?.id,
+      name:         sp.products?.name,
+      barcode:      sp.products?.barcode,
+      brand:        sp.products?.brand,
+      category:     sp.products?.category,
+      price:        sp.price,
+      mrp:          sp.mrp,
+      gst_percent:  sp.gst_percent,
+      in_stock:     sp.in_stock,
       is_available: sp.is_available,
     }));
 
@@ -375,12 +353,9 @@ router.get('/products', authAdmin, async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════
-// FIX 1: POST /products
-// — Always sets in_stock=true and is_available=true so scanner can find it
-// — Validates price > 0 (scanner was getting ₹1 placeholder)
-// — Returns full product info the scanner expects
-// ════════════════════════════════════════════════════════
+// ────────────────────────────────────────────────────────
+// POST /products  — Add product
+// ────────────────────────────────────────────────────────
 
 router.post('/products', authAdmin, async (req, res) => {
   try {
@@ -390,14 +365,13 @@ router.post('/products', authAdmin, async (req, res) => {
     if (!barcode || !name || !price)
       return res.status(400).json({ error: 'Barcode, name and price are required.' });
 
-    // FIX: strip currency symbols and validate price is a real number > 0
     price = parseFloat(String(price).replace(/[^\d.]/g, ''));
     mrp   = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
 
     if (isNaN(price) || price <= 0)
       return res.status(400).json({ error: 'Price must be a valid number greater than 0.' });
 
-    // Step 1: upsert into products table (global catalog)
+    // Step 1: upsert into products table
     const { data: product, error: prodError } = await supabase
       .from('products')
       .upsert(
@@ -407,43 +381,49 @@ router.post('/products', authAdmin, async (req, res) => {
       .select()
       .single();
 
-    if (prodError) throw prodError;
+    if (prodError) {
+      console.error('products upsert error:', prodError);
+      throw prodError;
+    }
 
     // Step 2: upsert into store_products
-    // FIX: always set in_stock=true and is_available=true so scanner finds this product
+    // in_stock=true + is_available=true so scanner finds product immediately
     const { data: storeProduct, error: spError } = await supabase
       .from('store_products')
       .upsert(
         {
           store_id,
-          product_id:  product.id,
+          product_id:   product.id,
           price,
           mrp,
-          gst_percent: parseFloat(gst_percent) || 0,
-          in_stock:    true,      // FIX: was missing — scanner checks this
-          is_available: true,     // FIX: was missing — scanner checks this
+          gst_percent:  parseFloat(gst_percent) || 0,
+          in_stock:     true,
+          is_available: true,
         },
         { onConflict: 'store_id,product_id' }
       )
       .select()
       .single();
 
-    if (spError) throw spError;
+    if (spError) {
+      console.error('store_products upsert error:', spError);
+      throw spError;
+    }
 
     return res.json({
       success: true,
       message: 'Product added successfully.',
       product: {
         store_product_id: storeProduct.id,
-        product_id:  product.id,
-        barcode:     product.barcode,
-        name:        product.name,
-        brand:       product.brand,
-        category:    product.category,
-        price:       storeProduct.price,
-        mrp:         storeProduct.mrp,
-        gst_percent: storeProduct.gst_percent,
-        in_stock:    storeProduct.in_stock,
+        product_id:   product.id,
+        barcode:      product.barcode,
+        name:         product.name,
+        brand:        product.brand,
+        category:     product.category,
+        price:        storeProduct.price,
+        mrp:          storeProduct.mrp,
+        gst_percent:  storeProduct.gst_percent,
+        in_stock:     storeProduct.in_stock,
         is_available: storeProduct.is_available,
       }
     });
@@ -454,30 +434,26 @@ router.post('/products', authAdmin, async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════
-// FIX 2: PUT /products/:id
-// — Updates both price AND in_stock/is_available together
-// — So toggling stock off actually makes scanner return 404 correctly
-// ════════════════════════════════════════════════════════
+// ────────────────────────────────────────────────────────
+// PUT /products/:id  — Edit product
+// ────────────────────────────────────────────────────────
 
 router.put('/products/:id', authAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id }   = req.params;
     const store_id = req.user.store_id;
     let { name, brand, category, price, mrp, gst_percent, in_stock, is_available } = req.body;
 
-    // FIX: validate price before saving — prevent ₹1 placeholder from reaching scanner
     price = parseFloat(String(price).replace(/[^\d.]/g, ''));
     mrp   = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
 
     if (isNaN(price) || price <= 0)
       return res.status(400).json({ error: 'Price must be greater than 0.' });
 
-    // FIX: keep is_available in sync with in_stock
-    // If admin marks out of stock, scanner must get 404
     const stockStatus = typeof in_stock === 'boolean' ? in_stock : true;
     const availStatus = typeof is_available === 'boolean' ? is_available : stockStatus;
 
+    // NOTE: do NOT set updated_at manually — column has DEFAULT now()
     const { error } = await supabase
       .from('store_products')
       .update({
@@ -485,27 +461,19 @@ router.put('/products/:id', authAdmin, async (req, res) => {
         mrp,
         gst_percent:  parseFloat(gst_percent) || 0,
         in_stock:     stockStatus,
-        is_available: availStatus,   // FIX: was not being updated
-        updated_at:   new Date().toISOString(),
+        is_available: availStatus,
       })
       .eq('id', id)
       .eq('store_id', store_id);
 
     if (error) throw error;
 
-    // Also update product master info if provided
     if (name || brand || category) {
       const { data: sp } = await supabase
-        .from('store_products')
-        .select('product_id')
-        .eq('id', id)
-        .single();
-
+        .from('store_products').select('product_id').eq('id', id).single();
       if (sp) {
-        await supabase
-          .from('products')
-          .update({ name, brand, category })
-          .eq('id', sp.product_id);
+        await supabase.from('products')
+          .update({ name, brand, category }).eq('id', sp.product_id);
       }
     }
 
@@ -516,6 +484,10 @@ router.put('/products/:id', authAdmin, async (req, res) => {
     return res.status(500).json({ error: 'Failed to update product.' });
   }
 });
+
+// ────────────────────────────────────────────────────────
+// DELETE /products/:id
+// ────────────────────────────────────────────────────────
 
 router.delete('/products/:id', authAdmin, async (req, res) => {
   try {
@@ -534,15 +506,13 @@ router.delete('/products/:id', authAdmin, async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════
-// FIX 3: NEW ROUTE — PATCH /products/:id/stock
-// Lets admin toggle stock on/off without touching price
-// Scanner checks in_stock + is_available — both must be true
-// ════════════════════════════════════════════════════════
+// ────────────────────────────────────────────────────────
+// PATCH /products/:id/stock  — Toggle stock on/off
+// ────────────────────────────────────────────────────────
 
 router.patch('/products/:id/stock', authAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id }       = req.params;
     const { in_stock } = req.body;
 
     if (typeof in_stock !== 'boolean')
@@ -550,11 +520,7 @@ router.patch('/products/:id/stock', authAdmin, async (req, res) => {
 
     const { error } = await supabase
       .from('store_products')
-      .update({
-        in_stock,
-        is_available: in_stock,   // keep in sync
-        updated_at: new Date().toISOString(),
-      })
+      .update({ in_stock, is_available: in_stock })
       .eq('id', id)
       .eq('store_id', req.user.store_id);
 
@@ -571,14 +537,13 @@ router.patch('/products/:id/stock', authAdmin, async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════
-// FIX 4: NEW ROUTE — POST /products/bulk
-// Import CSV rows at once — each row sets in_stock=true so scanner works immediately
-// ════════════════════════════════════════════════════════
+// ────────────────────────────────────────────────────────
+// POST /products/bulk  — Bulk import from CSV
+// ────────────────────────────────────────────────────────
 
 router.post('/products/bulk', authAdmin, async (req, res) => {
   try {
-    const store_id = req.user.store_id;
+    const store_id     = req.user.store_id;
     const { products } = req.body;
 
     if (!Array.isArray(products) || products.length === 0)
@@ -603,7 +568,6 @@ router.post('/products/bulk', authAdmin, async (req, res) => {
           continue;
         }
 
-        // Upsert product
         const { data: product, error: prodError } = await supabase
           .from('products')
           .upsert(
@@ -615,7 +579,6 @@ router.post('/products/bulk', authAdmin, async (req, res) => {
 
         if (prodError) throw prodError;
 
-        // Upsert store_products — always in_stock + is_available = true
         const { error: spError } = await supabase
           .from('store_products')
           .upsert(
@@ -641,8 +604,8 @@ router.post('/products/bulk', authAdmin, async (req, res) => {
     }
 
     return res.json({
-      success: true,
-      message: `${results.success.length} products imported, ${results.failed.length} failed.`,
+      success:  true,
+      message:  `${results.success.length} products imported, ${results.failed.length} failed.`,
       imported: results.success,
       failed:   results.failed,
     });
@@ -808,16 +771,6 @@ router.get('/analytics', authAdmin, async (req, res) => {
       .eq('store_id', store_id)
       .eq('in_stock', true);
 
-    const cutoff21 = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: recentSoldItems } = await supabase
-      .from('order_items')
-      .select('store_product_id, quantity, orders!inner(store_id, payment_status, created_at)')
-      .eq('orders.store_id', store_id)
-      .eq('orders.payment_status', 'paid')
-      .gte('orders.created_at', cutoff21);
-
-    const recentlySoldIds = new Set((recentSoldItems || []).map(i => i.store_product_id));
-
     const { data: allSoldItems } = await supabase
       .from('order_items')
       .select('store_product_id, orders!inner(store_id, payment_status, created_at)')
@@ -827,17 +780,15 @@ router.get('/analytics', authAdmin, async (req, res) => {
 
     const lastSoldMap = {};
     (allSoldItems || []).forEach(item => {
-      if (!lastSoldMap[item.store_product_id]) {
+      if (!lastSoldMap[item.store_product_id])
         lastSoldMap[item.store_product_id] = item.orders?.created_at;
-      }
     });
 
     const allProductsWithAge = (storeProducts || []).map(sp => {
-      const lastSold = lastSoldMap[sp.id];
+      const lastSold  = lastSoldMap[sp.id];
       const daysSince = lastSold
         ? Math.floor((Date.now() - new Date(lastSold).getTime()) / (1000 * 60 * 60 * 24))
         : 999;
-
       return {
         id:                   sp.id,
         name:                 sp.products?.name || 'Unknown',
@@ -874,7 +825,7 @@ router.get('/analytics', authAdmin, async (req, res) => {
     });
 
     const daysIntoMonth = new Date().getDate();
-    const starProducts = Object.values(starMap)
+    const starProducts  = Object.values(starMap)
       .sort((a, b) => b.units_sold - a.units_sold)
       .slice(0, 3)
       .map(p => ({
@@ -883,7 +834,7 @@ router.get('/analytics', authAdmin, async (req, res) => {
       }));
 
     const now           = new Date();
-    const weekStart     = new Date(now); weekStart.setDate(now.getDate() - 7);     weekStart.setHours(0, 0, 0, 0);
+    const weekStart     = new Date(now); weekStart.setDate(now.getDate() - 7);      weekStart.setHours(0, 0, 0, 0);
     const prevWeekStart = new Date(now); prevWeekStart.setDate(now.getDate() - 14); prevWeekStart.setHours(0, 0, 0, 0);
 
     const [
@@ -917,13 +868,12 @@ router.get('/analytics', authAdmin, async (req, res) => {
     const bestDayEntry = Object.entries(dayRevMap).sort((a, b) => b[1] - a[1])[0];
 
     let aiInsight = "Keep your top products stocked — they're driving consistent growth.";
-    if (thisWeekRevenue > lastWeekRevenue * 1.2) {
+    if (thisWeekRevenue > lastWeekRevenue * 1.2)
       aiInsight = "Great week! Revenue is up 20%+. Identify what drove this and repeat it next week.";
-    } else if (thisWeekRevenue < lastWeekRevenue * 0.8) {
+    else if (thisWeekRevenue < lastWeekRevenue * 0.8)
       aiInsight = "Revenue dipped this week. Check if any top products went out of stock.";
-    } else if (thisWeekOrderCount > lastWeekOrderCount) {
+    else if (thisWeekOrderCount > lastWeekOrderCount)
       aiInsight = "More orders this week. Focus on upselling to increase average order value.";
-    }
 
     const weeklySummary = {
       week_label:        weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
@@ -935,14 +885,14 @@ router.get('/analytics', authAdmin, async (req, res) => {
       prev_avg_order:    lastWeekOrderCount > 0
         ? parseFloat(((lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0) / lastWeekOrderCount).toFixed(2))
         : 0,
-      new_customers:     thisWeekNewUsers?.length || 0,
-      best_day:          bestDayEntry?.[0] || null,
-      best_day_revenue:  bestDayEntry?.[1] || 0,
-      ai_insight:        aiInsight,
+      new_customers:    thisWeekNewUsers?.length || 0,
+      best_day:         bestDayEntry?.[0] || null,
+      best_day_revenue: bestDayEntry?.[1] || 0,
+      ai_insight:       aiInsight,
     };
 
     return res.json({
-      success: true,
+      success:        true,
       revenue_chart:  Object.entries(revenueByDay).map(([day, rev]) => ({ day, rev })),
       top_products:   topProducts,
       all_products:   allProductsWithAge,
@@ -985,8 +935,8 @@ router.get('/export/orders', authAdmin, async (req, res) => {
 
     if (req.user.role === 'store_owner') query = query.eq('store_id', req.user.store_id);
     if (status && status !== 'all')      query = query.eq('payment_status', status);
-    if (from)  query = query.gte('created_at', new Date(from).toISOString());
-    if (to)    query = query.lte('created_at', new Date(to).toISOString());
+    if (from) query = query.gte('created_at', new Date(from).toISOString());
+    if (to)   query = query.lte('created_at', new Date(to).toISOString());
 
     const { data: orders, error } = await query;
     if (error) throw error;
@@ -1026,9 +976,9 @@ router.get('/export/products', authAdmin, async (req, res) => {
       name:         sp.products?.name     || '—',
       brand:        sp.products?.brand    || '—',
       category:     sp.products?.category || '—',
-      price:        sp.price        || 0,
-      mrp:          sp.mrp          || 0,
-      gst_percent:  sp.gst_percent  || 0,
+      price:        sp.price       || 0,
+      mrp:          sp.mrp         || 0,
+      gst_percent:  sp.gst_percent || 0,
       in_stock:     sp.in_stock     ? 'Yes' : 'No',
       is_available: sp.is_available ? 'Yes' : 'No',
     }));
@@ -1063,12 +1013,12 @@ router.get('/export/revenue', authAdmin, async (req, res) => {
     });
 
     const rows = Object.values(byDay).map(d => ({
-      date:         d.date,
-      total_orders: d.total_orders,
-      paid_orders:  d.paid_orders,
-      failed_orders:d.failed_orders,
-      revenue:      d.revenue.toFixed(2),
-      avg_order:    d.paid_orders > 0 ? (d.revenue / d.paid_orders).toFixed(2) : '0.00',
+      date:          d.date,
+      total_orders:  d.total_orders,
+      paid_orders:   d.paid_orders,
+      failed_orders: d.failed_orders,
+      revenue:       d.revenue.toFixed(2),
+      avg_order:     d.paid_orders > 0 ? (d.revenue / d.paid_orders).toFixed(2) : '0.00',
     }));
 
     const csv = toCSV(rows, ['date','total_orders','paid_orders','failed_orders','revenue','avg_order']);
@@ -1139,7 +1089,11 @@ router.get('/superadmin/stores', authSuperAdmin, async (req, res) => {
     const enriched = await Promise.all((stores || []).map(async store => {
       const { data: orders } = await supabase
         .from('orders').select('total').eq('store_id', store.id).eq('payment_status', 'paid');
-      return { ...store, order_count: orders?.length || 0, total_revenue: (orders || []).reduce((s, o) => s + (o.total || 0), 0) };
+      return {
+        ...store,
+        order_count:   orders?.length || 0,
+        total_revenue: (orders || []).reduce((s, o) => s + (o.total || 0), 0),
+      };
     }));
 
     return res.json({ success: true, stores: enriched });
