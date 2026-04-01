@@ -175,17 +175,11 @@ router.get('/stats', authAdmin, async (req, res) => {
     const yesterdayStart = new Date(Date.UTC(y, mo, d - 1) - IST);
     const yesterdayEnd   = todayStart;
 
-    // On the 1st of the month monthStart === todayStart → month_revenue === today_revenue.
-    // Fix: show previous month's full revenue when today is the 1st.
-    const isFirstOfMonth = d === 1;
-    const monthStart = isFirstOfMonth
-      ? new Date(Date.UTC(y, mo - 1, 1) - IST)   // prev month start
-      : new Date(Date.UTC(y, mo, 1)     - IST);   // this month start
+    const monthStart = new Date(Date.UTC(y, mo, 1) - IST);
 
-    let monthOrdersQ = supabase.from('orders').select('total')
+    const monthOrdersQ = supabase.from('orders').select('total')
       .eq('store_id', store_id).eq('payment_status', 'paid')
       .gte('created_at', monthStart.toISOString());
-    if (isFirstOfMonth) monthOrdersQ = monthOrdersQ.lt('created_at', todayStart.toISOString());
 
     const [
       { data: todayOrders },
