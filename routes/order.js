@@ -122,6 +122,25 @@ router.post('/verify', authenticate, async (req, res) => {
       );
     }
 
+    // Decrement stock_quantity for products that have it tracked
+    try {
+      await db.query(
+        `UPDATE store_products sp
+         SET stock_quantity = GREATEST(0, sp.stock_quantity - ci.quantity),
+             in_stock    = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0),
+             is_available = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0)
+         FROM cart_items ci
+         JOIN orders o ON o.session_id = ci.session_id
+         WHERE o.id = $1
+           AND sp.product_id = ci.product_id
+           AND sp.store_id   = o.store_id
+           AND sp.stock_quantity IS NOT NULL`,
+        [order_id]
+      );
+    } catch (stockErr) {
+      console.error('Stock decrement error (non-fatal):', stockErr.message);
+    }
+
     return res.json({
       success:          true,
       exit_qr:          exitQRData,

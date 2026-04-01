@@ -164,11 +164,28 @@ router.post('/forgot-password', async (req, res) => {
 
 router.get('/stats', authAdmin, async (req, res) => {
   try {
-    const store_id       = req.user.store_id;
-    const todayStart     = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const monthStart     = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
-    const yesterdayStart = new Date(); yesterdayStart.setDate(yesterdayStart.getDate() - 1); yesterdayStart.setHours(0, 0, 0, 0);
-    const yesterdayEnd   = new Date(); yesterdayEnd.setHours(0, 0, 0, 0);
+    const store_id = req.user.store_id;
+
+    // IST-aware date boundaries (UTC+5:30)
+    const IST = 5.5 * 60 * 60 * 1000;
+    const nowIST        = new Date(Date.now() + IST);
+    const y = nowIST.getUTCFullYear(), mo = nowIST.getUTCMonth(), d = nowIST.getUTCDate();
+
+    const todayStart     = new Date(Date.UTC(y, mo, d)     - IST);
+    const yesterdayStart = new Date(Date.UTC(y, mo, d - 1) - IST);
+    const yesterdayEnd   = todayStart;
+
+    // On the 1st of the month monthStart === todayStart → month_revenue === today_revenue.
+    // Fix: show previous month's full revenue when today is the 1st.
+    const isFirstOfMonth = d === 1;
+    const monthStart = isFirstOfMonth
+      ? new Date(Date.UTC(y, mo - 1, 1) - IST)   // prev month start
+      : new Date(Date.UTC(y, mo, 1)     - IST);   // this month start
+
+    let monthOrdersQ = supabase.from('orders').select('total')
+      .eq('store_id', store_id).eq('payment_status', 'paid')
+      .gte('created_at', monthStart.toISOString());
+    if (isFirstOfMonth) monthOrdersQ = monthOrdersQ.lt('created_at', todayStart.toISOString());
 
     const [
       { data: todayOrders },
@@ -184,7 +201,7 @@ router.get('/stats', authAdmin, async (req, res) => {
       { data: allOrderUsers },
     ] = await Promise.all([
       supabase.from('orders').select('total').eq('store_id', store_id).eq('payment_status', 'paid').gte('created_at', todayStart.toISOString()),
-      supabase.from('orders').select('total').eq('store_id', store_id).eq('payment_status', 'paid').gte('created_at', monthStart.toISOString()),
+      monthOrdersQ,
       supabase.from('sessions').select('id').eq('store_id', store_id).eq('status', 'active'),
       supabase.from('store_products').select('id', { count: 'exact' }).eq('store_id', store_id).eq('is_available', true),
       supabase.from('orders').select('id', { count: 'exact' }).eq('store_id', store_id).gte('created_at', todayStart.toISOString()),
@@ -325,7 +342,7 @@ router.get('/products', authAdmin, async (req, res) => {
   try {
     const { data: products, error } = await supabase
       .from('store_products')
-      .select(`id, price, mrp, gst_percent, in_stock, is_available, products(id, name, barcode, brand, category)`)
+      .select(`id, price, mrp, gst_percent, in_stock, is_available, stock_quantity, max_stock, products(id, name, barcode, brand, category)`)
       .eq('store_id', req.user.store_id)
       .order('updated_at', { ascending: false });
 
@@ -333,16 +350,18 @@ router.get('/products', authAdmin, async (req, res) => {
 
     const flat = (products || []).map(sp => ({
       store_product_id: sp.id,
-      product_id:   sp.products?.id,
-      name:         sp.products?.name,
-      barcode:      sp.products?.barcode,
-      brand:        sp.products?.brand,
-      category:     sp.products?.category,
-      price:        sp.price,
-      mrp:          sp.mrp,
-      gst_percent:  sp.gst_percent,
-      in_stock:     sp.in_stock,
-      is_available: sp.is_available,
+      product_id:    sp.products?.id,
+      name:          sp.products?.name,
+      barcode:       sp.products?.barcode,
+      brand:         sp.products?.brand,
+      category:      sp.products?.category,
+      price:         sp.price,
+      mrp:           sp.mrp,
+      gst_percent:   sp.gst_percent,
+      in_stock:      sp.in_stock,
+      is_available:  sp.is_available,
+      stock_quantity: sp.stock_quantity,
+      max_stock:     sp.max_stock,
     }));
 
     return res.json({ success: true, products: flat });
@@ -360,7 +379,7 @@ router.get('/products', authAdmin, async (req, res) => {
 router.post('/products', authAdmin, async (req, res) => {
   try {
     const store_id = req.user.store_id;
-    let { barcode, name, brand, category, price, mrp, gst_percent } = req.body;
+    let { barcode, name, brand, category, price, mrp, gst_percent, stock_quantity } = req.body;
 
     if (!barcode || !name || !price)
       return res.status(400).json({ error: 'Barcode, name and price are required.' });
@@ -393,12 +412,14 @@ router.post('/products', authAdmin, async (req, res) => {
       .upsert(
         {
           store_id,
-          product_id:   product.id,
+          product_id:    product.id,
           price,
           mrp,
-          gst_percent:  parseFloat(gst_percent) || 0,
-          in_stock:     true,
-          is_available: true,
+          gst_percent:   parseFloat(gst_percent) || 0,
+          in_stock:      true,
+          is_available:  true,
+          stock_quantity: stock_quantity != null && stock_quantity !== '' ? parseInt(stock_quantity) : null,
+          max_stock:     stock_quantity != null && stock_quantity !== '' ? parseInt(stock_quantity) : null,
         },
         { onConflict: 'store_id,product_id' }
       )
@@ -442,7 +463,7 @@ router.put('/products/:id', authAdmin, async (req, res) => {
   try {
     const { id }   = req.params;
     const store_id = req.user.store_id;
-    let { name, brand, category, price, mrp, gst_percent, in_stock, is_available } = req.body;
+    let { name, brand, category, price, mrp, gst_percent, in_stock, is_available, stock_quantity, max_stock } = req.body;
 
     price = parseFloat(String(price).replace(/[^\d.]/g, ''));
     mrp   = parseFloat(String(mrp || price).replace(/[^\d.]/g, ''));
@@ -454,15 +475,23 @@ router.put('/products/:id', authAdmin, async (req, res) => {
     const availStatus = typeof is_available === 'boolean' ? is_available : stockStatus;
 
     // NOTE: do NOT set updated_at manually — column has DEFAULT now()
+    const updatePayload = {
+      price,
+      mrp,
+      gst_percent:  parseFloat(gst_percent) || 0,
+      in_stock:     stockStatus,
+      is_available: availStatus,
+    };
+    if (stock_quantity != null && stock_quantity !== '') {
+      updatePayload.stock_quantity = parseInt(stock_quantity);
+    }
+    // Only update max_stock when explicitly provided in the form (preserves original capacity)
+    if (max_stock != null && max_stock !== '') {
+      updatePayload.max_stock = parseInt(max_stock);
+    }
     const { error } = await supabase
       .from('store_products')
-      .update({
-        price,
-        mrp,
-        gst_percent:  parseFloat(gst_percent) || 0,
-        in_stock:     stockStatus,
-        is_available: availStatus,
-      })
+      .update(updatePayload)
       .eq('id', id)
       .eq('store_id', store_id);
 
@@ -534,6 +563,39 @@ router.patch('/products/:id/stock', authAdmin, async (req, res) => {
   } catch (error) {
     console.error('Stock toggle error:', error.message);
     return res.status(500).json({ error: 'Failed to update stock status.' });
+  }
+});
+
+// ────────────────────────────────────────────────────────
+// PATCH /products/:id/qty  — Set stock quantity
+// ────────────────────────────────────────────────────────
+
+router.patch('/products/:id/qty', authAdmin, async (req, res) => {
+  try {
+    const { id }           = req.params;
+    const { stock_quantity } = req.body;
+    const qty = parseInt(stock_quantity);
+
+    if (isNaN(qty) || qty < 0)
+      return res.status(400).json({ error: 'stock_quantity must be a non-negative number.' });
+
+    const { error } = await supabase
+      .from('store_products')
+      .update({
+        stock_quantity: qty,
+        max_stock:      qty,
+        in_stock:       qty > 0,
+        is_available:   qty > 0,
+      })
+      .eq('id', id)
+      .eq('store_id', req.user.store_id);
+
+    if (error) throw error;
+    return res.json({ success: true, message: 'Stock quantity updated.' });
+
+  } catch (error) {
+    console.error('Qty update error:', error.message);
+    return res.status(500).json({ error: 'Failed to update stock quantity.' });
   }
 });
 
@@ -767,9 +829,8 @@ router.get('/analytics', authAdmin, async (req, res) => {
 
     const { data: storeProducts } = await supabase
       .from('store_products')
-      .select('id, in_stock, price, products(id, name)')
-      .eq('store_id', store_id)
-      .eq('in_stock', true);
+      .select('id, in_stock, price, stock_quantity, max_stock, products(id, name)')
+      .eq('store_id', store_id);
 
     const { data: allSoldItems } = await supabase
       .from('order_items')
@@ -795,11 +856,14 @@ router.get('/analytics', authAdmin, async (req, res) => {
         stock:                sp.in_stock ? 1 : 0,
         price:                sp.price || 0,
         days_since_last_sale: daysSince,
+        stock_quantity:       sp.stock_quantity,
+        max_stock:            sp.max_stock,
       };
     });
 
+    // dead stock: only in-stock products that haven't sold in 21+ days
     const deadStock = allProductsWithAge
-      .filter(p => p.days_since_last_sale >= 21)
+      .filter(p => p.stock === 1 && p.days_since_last_sale >= 21)
       .sort((a, b) => b.days_since_last_sale - a.days_since_last_sale)
       .slice(0, 5)
       .map(p => ({

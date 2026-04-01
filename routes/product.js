@@ -1,150 +1,202 @@
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
 const db = require('../db');
-const { authenticate } = require('../middleware/auth'); // ✅ FIXED IMPORT
+const { authenticateAdmin } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────
-// GET PRODUCT BY BARCODE
+// GET ALL PRODUCTS FOR STORE
 // ─────────────────────────────────────────────
-router.get('/:barcode', authenticate, async (req, res) => {
-  const { barcode } = req.params;
-  const { store_id } = req.query;
-
-  // ✅ Validate input
-  if (!store_id) {
-    return res.status(400).json({ error: 'store_id is required' });
-  }
+router.get('/', authenticateAdmin, async (req, res) => {
+  const { store_id } = req.admin;
 
   try {
-    // ✅ Step 1: Check product in DB (WITH store mapping)
     const result = await db.query(
-      `SELECT 
-          p.id, p.barcode, p.name, p.brand, p.image_url, p.category, p.quantity,
-          sp.price, sp.mrp, sp.gst_percent, sp.in_stock
-       FROM products p
-       JOIN store_products sp ON sp.product_id = p.id
-       WHERE p.barcode = $1 AND sp.store_id = $2`,
-      [barcode, store_id]
+      `SELECT
+         sp.id            AS store_product_id,
+         sp.store_id,
+         sp.price,
+         sp.mrp,
+         sp.gst_percent,
+         sp.in_stock,
+         sp.stock_quantity,   -- ← FIX: include stock_quantity
+         sp.max_stock,        -- ← FIX: include max_stock
+         p.id             AS product_id,
+         p.barcode,
+         p.name,
+         p.brand,
+         p.image_url,
+         p.category,
+         p.quantity       AS unit_quantity,
+         p.created_at
+       FROM store_products sp
+       JOIN products p ON p.id = sp.product_id
+       WHERE sp.store_id = $1
+       ORDER BY p.name ASC`,
+      [store_id]
     );
 
-    // ✅ Product found in store
-    if (result.rows.length > 0) {
-      const product = result.rows[0];
-
-      // ❗ Out of stock handling
-      if (!product.in_stock) {
-        return res.json({
-          found: true,
-          in_stock: false,
-          message: 'Out of stock',
-          product
-        });
-      }
-
-      // ✅ Log scan event
-      await logScan(req.user.id, store_id, product.id, barcode, 'scanned');
-
-      return res.json({
-        found: true,
-        source: 'database',
-        product
-      });
-    }
-
-    // ─────────────────────────────────────────────
-    // Step 2: Try external API (fallback)
-    // ─────────────────────────────────────────────
-    try {
-      const ext = await axios.get(
-        `https://world.openfoodfacts.org/api/v0/product/${barcode}.json`,
-        { timeout: 5000 }
-      );
-
-      if (ext.data.status === 1 && ext.data.product) {
-        const p = ext.data.product;
-
-        // ✅ Insert into products table (if not exists)
-        const insertRes = await db.query(
-          `INSERT INTO products (barcode, name, brand, image_url, category, quantity)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (barcode) DO NOTHING
-           RETURNING id`,
-          [
-            barcode,
-            p.product_name || 'Unknown',
-            p.brands || '',
-            p.image_url || '',
-            p.categories || '',
-            p.quantity || ''
-          ]
-        );
-
-        // ✅ Get product id (existing or inserted)
-        let productId;
-        if (insertRes.rows.length > 0) {
-          productId = insertRes.rows[0].id;
-        } else {
-          const existing = await db.query(
-            `SELECT id FROM products WHERE barcode = $1`,
-            [barcode]
-          );
-          productId = existing.rows[0]?.id;
-        }
-
-        // ⚠️ IMPORTANT: Add to store_products (THIS WAS YOUR BUG)
-        if (productId) {
-          await db.query(
-            `INSERT INTO store_products (store_id, product_id, price, mrp, gst_percent, in_stock)
-             VALUES ($1, $2, 0, 0, 0, true)
-             ON CONFLICT (store_id, product_id) DO NOTHING`,
-            [store_id, productId]
-          );
-        }
-
-        return res.json({
-          found: true,
-          source: 'external',
-          price_needed: true,
-          product: {
-            barcode,
-            name: p.product_name || 'Unknown',
-            brand: p.brands || '',
-            image_url: p.image_url || '',
-            price: null
-          }
-        });
-      }
-    } catch (e) {
-      console.log('Open Food Facts unavailable:', e.message);
-    }
-
-    // ❌ Final fallback
-    return res.status(404).json({
-      found: false,
-      message: 'Product not found. Ask store staff.'
-    });
-
-  } catch (error) {
-    console.error('Product fetch error:', error);
-    return res.status(500).json({ error: 'Could not fetch product' });
+    return res.json({ products: result.rows });
+  } catch (err) {
+    console.error('GET products error:', err);
+    return res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
 
 // ─────────────────────────────────────────────
-// LOG SCAN EVENT
+// ADD PRODUCT
 // ─────────────────────────────────────────────
-const logScan = async (userId, storeId, productId, barcode, action) => {
+router.post('/', authenticateAdmin, async (req, res) => {
+  const { store_id } = req.admin;
+  const {
+    barcode, name, brand = '', category = '',
+    price = 0, in_stock = true,
+    stock_quantity = null, max_stock = null
+  } = req.body;
+
+  if (!barcode || !name) {
+    return res.status(400).json({ error: 'barcode and name are required' });
+  }
+
+  try {
+    // 1. Upsert into products table
+    const productRes = await db.query(
+      `INSERT INTO products (barcode, name, brand, category)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (barcode) DO UPDATE
+         SET name     = EXCLUDED.name,
+             brand    = EXCLUDED.brand,
+             category = EXCLUDED.category
+       RETURNING id`,
+      [barcode, name, brand, category]
+    );
+    const productId = productRes.rows[0].id;
+
+    // 2. Upsert into store_products with stock fields
+    const spRes = await db.query(
+      `INSERT INTO store_products
+         (store_id, product_id, price, mrp, gst_percent, in_stock, stock_quantity, max_stock)
+       VALUES ($1, $2, $3, $3, 0, $4, $5, $6)
+       ON CONFLICT (store_id, product_id) DO UPDATE
+         SET price          = EXCLUDED.price,
+             mrp            = EXCLUDED.mrp,
+             in_stock       = EXCLUDED.in_stock,
+             stock_quantity = EXCLUDED.stock_quantity,
+             max_stock      = EXCLUDED.max_stock
+       RETURNING id`,
+      [store_id, productId, parseFloat(price) || 0, in_stock,
+       stock_quantity !== '' && stock_quantity !== null ? parseInt(stock_quantity) : null,
+       max_stock !== '' && max_stock !== null ? parseInt(max_stock) : null]
+    );
+
+    return res.json({ success: true, store_product_id: spRes.rows[0].id });
+  } catch (err) {
+    console.error('POST product error:', err);
+    return res.status(500).json({ error: 'Failed to add product' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// UPDATE PRODUCT
+// ─────────────────────────────────────────────
+router.put('/:id', authenticateAdmin, async (req, res) => {
+  const { store_id } = req.admin;
+  const { id } = req.params; // store_product_id
+  const {
+    barcode, name, brand = '', category = '',
+    price = 0, in_stock = true,
+    stock_quantity, max_stock
+  } = req.body;
+
+  try {
+    // 1. Get the product_id from store_products
+    const spCheck = await db.query(
+      `SELECT product_id FROM store_products WHERE id = $1 AND store_id = $2`,
+      [id, store_id]
+    );
+    if (!spCheck.rows.length) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    const productId = spCheck.rows[0].product_id;
+
+    // 2. Update products table (name, brand, category, barcode)
+    await db.query(
+      `UPDATE products
+       SET name = $1, brand = $2, category = $3, barcode = $4
+       WHERE id = $5`,
+      [name, brand, category, barcode, productId]
+    );
+
+    // 3. Update store_products — INCLUDING stock_quantity and max_stock
+    await db.query(
+      `UPDATE store_products
+       SET price          = $1,
+           mrp            = $1,
+           in_stock       = $2,
+           stock_quantity = $3,
+           max_stock      = $4
+       WHERE id = $5 AND store_id = $6`,
+      [
+        parseFloat(price) || 0,
+        in_stock,
+        stock_quantity !== '' && stock_quantity !== null && stock_quantity !== undefined
+          ? parseInt(stock_quantity) : null,
+        max_stock !== '' && max_stock !== null && max_stock !== undefined
+          ? parseInt(max_stock) : null,
+        id,
+        store_id
+      ]
+    );
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('PUT product error:', err);
+    return res.status(500).json({ error: 'Failed to update product' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// DELETE PRODUCT FROM STORE
+// ─────────────────────────────────────────────
+router.delete('/:id', authenticateAdmin, async (req, res) => {
+  const { store_id } = req.admin;
+  const { id } = req.params;
+
   try {
     await db.query(
-      `INSERT INTO scan_events 
-       (user_id, store_id, product_id, barcode, action) 
-       VALUES ($1, $2, $3, $4, $5)`,
-      [userId, storeId, productId, barcode, action]
+      `DELETE FROM store_products WHERE id = $1 AND store_id = $2`,
+      [id, store_id]
     );
-  } catch (e) {
-    console.log('Scan log failed:', e.message);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE product error:', err);
+    return res.status(500).json({ error: 'Failed to delete product' });
   }
-};
+});
+
+// ─────────────────────────────────────────────
+// PATCH STOCK QUANTITY ONLY (dashboard quick update)
+// ─────────────────────────────────────────────
+router.patch('/:id/qty', authenticateAdmin, async (req, res) => {
+  const { store_id } = req.admin;
+  const { id } = req.params;
+  const { stock_quantity } = req.body;
+
+  if (stock_quantity === undefined || stock_quantity === null) {
+    return res.status(400).json({ error: 'stock_quantity is required' });
+  }
+
+  try {
+    await db.query(
+      `UPDATE store_products
+       SET stock_quantity = $1
+       WHERE id = $2 AND store_id = $3`,
+      [parseInt(stock_quantity), id, store_id]
+    );
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('PATCH qty error:', err);
+    return res.status(500).json({ error: 'Failed to update stock quantity' });
+  }
+});
 
 module.exports = router;
