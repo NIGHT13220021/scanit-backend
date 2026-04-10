@@ -898,7 +898,7 @@ router.get('/analytics', authAdmin, async (req, res) => {
     const [
       { data: thisWeekOrders },
       { data: lastWeekOrders },
-      { data: thisWeekNewUsers },
+      { data: thisWeekBuyerIds },
     ] = await Promise.all([
       supabase.from('orders').select('total, created_at, user_id')
         .eq('store_id', store_id).eq('payment_status', 'paid')
@@ -907,16 +907,35 @@ router.get('/analytics', authAdmin, async (req, res) => {
         .eq('store_id', store_id).eq('payment_status', 'paid')
         .gte('created_at', prevWeekStart.toISOString())
         .lt('created_at', weekStart.toISOString()),
-      supabase.from('users').select('id')
-        .eq('role', 'customer')
+      // store-specific: users who bought here this week
+      supabase.from('orders').select('user_id')
+        .eq('store_id', store_id).eq('payment_status', 'paid')
         .gte('created_at', weekStart.toISOString()),
     ]);
+
+    // New customers = buyers this week who have NO prior order at this store
+    const uniqueThisWeekBuyers = [...new Set((thisWeekBuyerIds || []).map(o => o.user_id))];
+    let newCustomerCount = 0;
+    if (uniqueThisWeekBuyers.length > 0) {
+      const { data: priorBuyers } = await supabase
+        .from('orders')
+        .select('user_id')
+        .eq('store_id', store_id)
+        .eq('payment_status', 'paid')
+        .lt('created_at', weekStart.toISOString())
+        .in('user_id', uniqueThisWeekBuyers);
+      const priorSet = new Set((priorBuyers || []).map(o => o.user_id));
+      newCustomerCount = uniqueThisWeekBuyers.filter(id => !priorSet.has(id)).length;
+    }
 
     const thisWeekRevenue    = (thisWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0);
     const lastWeekRevenue    = (lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0);
     const thisWeekOrderCount = thisWeekOrders?.length || 0;
     const lastWeekOrderCount = lastWeekOrders?.length || 0;
     const avgOrderValue      = thisWeekOrderCount > 0 ? thisWeekRevenue / thisWeekOrderCount : 0;
+    const prevAvgOrder       = lastWeekOrderCount > 0
+      ? parseFloat(((lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0) / lastWeekOrderCount).toFixed(2))
+      : 0;
 
     const dayRevMap = {};
     (thisWeekOrders || []).forEach(o => {
@@ -925,28 +944,53 @@ router.get('/analytics', authAdmin, async (req, res) => {
     });
     const bestDayEntry = Object.entries(dayRevMap).sort((a, b) => b[1] - a[1])[0];
 
-    let aiInsight = "Keep your top products stocked — they're driving consistent growth.";
-    if (thisWeekRevenue > lastWeekRevenue * 1.2)
-      aiInsight = "Great week! Revenue is up 20%+. Identify what drove this and repeat it next week.";
-    else if (thisWeekRevenue < lastWeekRevenue * 0.8)
-      aiInsight = "Revenue dipped this week. Check if any top products went out of stock.";
-    else if (thisWeekOrderCount > lastWeekOrderCount)
-      aiInsight = "More orders this week. Focus on upselling to increase average order value.";
+    // ── Improved AI insight ───────────────────────────────────────────────────
+    const revChangePct = lastWeekRevenue > 0
+      ? Math.round(((thisWeekRevenue - lastWeekRevenue) / lastWeekRevenue) * 100)
+      : null;
+    const aovChangePct = prevAvgOrder > 0
+      ? Math.round(((avgOrderValue - prevAvgOrder) / prevAvgOrder) * 100)
+      : null;
+    const newCustSharePct = thisWeekOrderCount > 0
+      ? Math.round((newCustomerCount / thisWeekOrderCount) * 100)
+      : 0;
+
+    let aiInsight;
+    if (revChangePct !== null && revChangePct >= 20) {
+      aiInsight = `Revenue up ${revChangePct}% vs last week. ${bestDayEntry ? `${bestDayEntry[0]} was your best day — figure out what drove it and repeat.` : 'Great momentum — keep top products stocked.'}`;
+    } else if (revChangePct !== null && revChangePct <= -20) {
+      aiInsight = `Revenue down ${Math.abs(revChangePct)}% vs last week. Check if a top product ran out of stock, or if fewer customers came in.`;
+    } else if (aovChangePct !== null && aovChangePct >= 15) {
+      aiInsight = `Average order value up ₹${Math.round(avgOrderValue - prevAvgOrder)} this week. Customers are buying more per visit — great sign.`;
+    } else if (newCustSharePct >= 30) {
+      aiInsight = `${newCustomerCount} first-time shoppers this week (${newCustSharePct}% of orders). Focus on getting them to return — consider a loyalty offer.`;
+    } else if (thisWeekOrderCount > lastWeekOrderCount && aovChangePct !== null && aovChangePct < 0) {
+      aiInsight = `More orders this week but average order value dropped ₹${Math.abs(Math.round(avgOrderValue - prevAvgOrder))}. Try bundling products to lift cart size.`;
+    } else if (deadStock.length > 0) {
+      const d = deadStock[0];
+      aiInsight = `"${d.name}" hasn't sold in ${d.days_idle} days. Consider a discount or moving it to a more visible spot.`;
+    } else if (bestDayEntry) {
+      aiInsight = `${bestDayEntry[0]} was your busiest day this week. Consider running offers on slower days to even out sales.`;
+    } else {
+      aiInsight = `Steady week. Keep your top products stocked and watch for restock opportunities.`;
+    }
+
+    // Fix week_label: show range e.g. "3 Apr – 10 Apr"
+    const weekEndLabel  = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+    const weekStartLabel = weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 
     const weeklySummary = {
-      week_label:        weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+      week_label:        `${weekStartLabel} – ${weekEndLabel}`,
       this_week_revenue: thisWeekRevenue,
       last_week_revenue: lastWeekRevenue,
       this_week_orders:  thisWeekOrderCount,
       last_week_orders:  lastWeekOrderCount,
       avg_order_value:   parseFloat(avgOrderValue.toFixed(2)),
-      prev_avg_order:    lastWeekOrderCount > 0
-        ? parseFloat(((lastWeekOrders || []).reduce((s, o) => s + (o.total || 0), 0) / lastWeekOrderCount).toFixed(2))
-        : 0,
-      new_customers:    thisWeekNewUsers?.length || 0,
-      best_day:         bestDayEntry?.[0] || null,
-      best_day_revenue: bestDayEntry?.[1] || 0,
-      ai_insight:       aiInsight,
+      prev_avg_order:    prevAvgOrder,
+      new_customers:     newCustomerCount,
+      best_day:          bestDayEntry?.[0] || null,
+      best_day_revenue:  bestDayEntry?.[1] || 0,
+      ai_insight:        aiInsight,
     };
 
     return res.json({
