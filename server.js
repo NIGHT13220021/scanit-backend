@@ -21,7 +21,7 @@ app.use('/api/product', require('./routes/product')); // browsing is public
 app.use('/api/session', authenticate, require('./routes/session'));
 app.use('/api/cart',    authenticate, require('./routes/cart'));
 app.use('/api/order',   authenticate, require('./routes/order'));
-app.use('/api/exit',    authenticate, require('./routes/exit'));
+app.use('/api/exit',    require('./routes/exit'));  // /verify is public; individual routes use authenticate internally
 app.use('/api/admin',   require('./routes/admin'));
 
 // ── Health check ──

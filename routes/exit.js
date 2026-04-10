@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const { authenticate } = require('../middleware/auth');
 
-// ✅ GET exit code for session
+// ✅ GET exit code for session (requires customer auth)
 router.get('/code/:sessionId', authenticate, async (req, res) => {
   const { sessionId } = req.params;
   try {
