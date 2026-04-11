@@ -336,12 +336,123 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-// ── Auto-fail stale pending orders ───────────────────────
+// ── POST /api/order/create-upi ───────────────────────────
+router.post('/create-upi', authenticate, async (req, res) => {
+  const { session_id } = req.body;
+  try {
+    const cartTotal = await db.query(
+      `SELECT SUM(ci.quantity * ci.price_at_scan) as total
+       FROM cart_items ci
+       JOIN sessions s ON s.id = ci.session_id
+       WHERE ci.session_id = $1 AND s.user_id = $2 AND s.status = 'active'`,
+      [session_id, req.user.id]
+    );
+
+    if (!cartTotal.rows[0].total)
+      return res.status(400).json({ error: 'Cart is empty' });
+
+    const total       = parseFloat(cartTotal.rows[0].total);
+    const orderNumber = 'ORYN-' + Date.now();
+
+    const order = await db.query(
+      `INSERT INTO orders
+         (order_number, session_id, user_id, store_id, total, subtotal, payment_status, payment_method)
+       SELECT $1, $2, $3, store_id, $4, $4, 'pending', 'upi'
+       FROM sessions WHERE id = $2
+       RETURNING *`,
+      [orderNumber, session_id, req.user.id, total]
+    );
+
+    return res.json({
+      success:      true,
+      order_id:     order.rows[0].id,
+      order_number: orderNumber,
+      amount:       total,
+    });
+
+  } catch (error) {
+    console.error('Create UPI order error:', error.message);
+    return res.status(500).json({ error: 'Could not create order' });
+  }
+});
+
+// ── POST /api/order/upi-confirm ──────────────────────────
+router.post('/upi-confirm', authenticate, async (req, res) => {
+  const { order_id } = req.body;
+  try {
+    const orderCheck = await db.query(
+      `SELECT * FROM orders
+       WHERE id = $1 AND user_id = $2
+         AND payment_method = 'upi' AND payment_status = 'pending'`,
+      [order_id, req.user.id]
+    );
+
+    if (orderCheck.rows.length === 0)
+      return res.status(404).json({ error: 'Order not found or already processed' });
+
+    await db.query(
+      `UPDATE orders SET payment_status = 'paid' WHERE id = $1`,
+      [order_id]
+    );
+
+    const sessionResult = await db.query(
+      `SELECT session_id FROM orders WHERE id = $1`, [order_id]
+    );
+    const session_id = sessionResult.rows[0]?.session_id;
+
+    if (session_id) {
+      const cartStats = await db.query(
+        `SELECT COUNT(*) as item_count, SUM(quantity * price_at_scan) as total
+         FROM cart_items WHERE session_id = $1`,
+        [session_id]
+      );
+      const stats = cartStats.rows[0];
+      await db.query(
+        `UPDATE sessions
+         SET status        = 'completed',
+             exit_time     = NOW(),
+             payment_time  = NOW(),
+             total_amount  = $1,
+             item_count    = $2,
+             duration_mins = ROUND(EXTRACT(EPOCH FROM (NOW() - entry_time))/60)
+         WHERE id = $3`,
+        [stats.total || 0, stats.item_count || 0, session_id]
+      );
+    }
+
+    try {
+      await db.query(
+        `UPDATE store_products sp
+         SET stock_quantity = GREATEST(0, sp.stock_quantity - ci.quantity),
+             in_stock       = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0),
+             is_available   = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0)
+         FROM cart_items ci
+         JOIN orders o ON o.session_id = ci.session_id
+         WHERE o.id = $1
+           AND sp.product_id  = ci.product_id
+           AND sp.store_id    = o.store_id
+           AND sp.stock_quantity IS NOT NULL`,
+        [order_id]
+      );
+    } catch (stockErr) {
+      console.error('Stock decrement error (non-fatal):', stockErr.message);
+    }
+
+    return res.json({ success: true, message: 'UPI payment confirmed!', order_id });
+
+  } catch (error) {
+    console.error('UPI confirm error:', error.message);
+    return res.status(500).json({ error: 'Could not confirm payment' });
+  }
+});
+
+// ── Auto-fail stale pending orders (Razorpay only) ────────
 const cleanPendingOrders = async () => {
   try {
     await db.query(
       `UPDATE orders SET payment_status = 'failed'
        WHERE payment_status = 'pending'
+         AND (payment_method IS NULL OR payment_method = 'razorpay')
          AND razorpay_payment_id IS NULL
          AND created_at < NOW() - INTERVAL '30 minutes'`
     );

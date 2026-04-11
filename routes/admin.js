@@ -1255,4 +1255,208 @@ router.put('/superadmin/stores/:id/billing', authSuperAdmin, async (req, res) =>
   }
 });
 
+// ════════════════════════════════════════════════════════
+// BILLING — STORE OWNER (sees own billing summary)
+// ════════════════════════════════════════════════════════
+
+router.get('/billing/current', authAdmin, async (req, res) => {
+  try {
+    const store_id = req.user.store_id;
+    const now      = new Date();
+    const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const monthStart   = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const monthEnd     = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString();
+
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('total, payment_method')
+      .eq('store_id', store_id)
+      .eq('payment_status', 'paid')
+      .gte('created_at', monthStart)
+      .lte('created_at', monthEnd);
+
+    const totalGmv       = (orders || []).reduce((s, o) => s + (o.total || 0), 0);
+    const upiOrders      = (orders || []).filter(o => o.payment_method === 'upi').length;
+    const razorpayOrders = (orders || []).filter(o => o.payment_method !== 'upi').length;
+    const vayu_fee_amount = parseFloat((totalGmv * 1 / 100).toFixed(2));
+
+    const { data: billingRecord } = await supabase
+      .from('store_billing')
+      .select('*')
+      .eq('store_id', store_id)
+      .eq('billing_month', billingMonth)
+      .single();
+
+    return res.json({
+      success:         true,
+      billing_month:   billingMonth,
+      month_label:     now.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+      total_gmv:       parseFloat(totalGmv.toFixed(2)),
+      upi_orders:      upiOrders,
+      razorpay_orders: razorpayOrders,
+      total_orders:    orders?.length || 0,
+      vayu_fee_percent: 1.00,
+      vayu_fee_amount,
+      billing_status:  billingRecord?.status || 'not_generated',
+      paid_at:         billingRecord?.paid_at || null,
+    });
+
+  } catch (error) {
+    console.error('Billing current error:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch billing summary.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════
+// BILLING — SUPER ADMIN (manage all stores billing)
+// ════════════════════════════════════════════════════════
+
+// GET all stores billing for a given month
+router.get('/superadmin/billing', authSuperAdmin, async (req, res) => {
+  try {
+    const { month } = req.query; // '2026-05' or omit for current month
+    const now = new Date();
+    const billingMonth = month || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const [year, mo]   = billingMonth.split('-').map(Number);
+    const monthStart   = new Date(year, mo - 1, 1).toISOString();
+    const monthEnd     = new Date(year, mo, 0, 23, 59, 59).toISOString();
+
+    const { data: stores } = await supabase
+      .from('stores')
+      .select('id, name, city, plan, is_active')
+      .order('name');
+
+    const storeIds = (stores || []).map(s => s.id);
+
+    // Fetch all paid orders for the month across all stores
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('store_id, total, payment_method')
+      .in('store_id', storeIds)
+      .eq('payment_status', 'paid')
+      .gte('created_at', monthStart)
+      .lte('created_at', monthEnd);
+
+    // Fetch existing billing records for this month
+    const { data: billingRecords } = await supabase
+      .from('store_billing')
+      .select('*')
+      .in('store_id', storeIds)
+      .eq('billing_month', billingMonth);
+
+    const billingMap = {};
+    (billingRecords || []).forEach(b => { billingMap[b.store_id] = b; });
+
+    const result = (stores || []).map(store => {
+      const storeOrders    = (orders || []).filter(o => o.store_id === store.id);
+      const gmv            = storeOrders.reduce((s, o) => s + (o.total || 0), 0);
+      const upiCount       = storeOrders.filter(o => o.payment_method === 'upi').length;
+      const razorpayCount  = storeOrders.filter(o => o.payment_method !== 'upi').length;
+      const feeAmount      = parseFloat((gmv * 1 / 100).toFixed(2));
+      const record         = billingMap[store.id];
+
+      return {
+        store_id:        store.id,
+        store_name:      store.name,
+        city:            store.city || '—',
+        plan:            store.plan,
+        is_active:       store.is_active,
+        total_gmv:       parseFloat(gmv.toFixed(2)),
+        upi_orders:      upiCount,
+        razorpay_orders: razorpayCount,
+        total_orders:    storeOrders.length,
+        vayu_fee_amount: feeAmount,
+        billing_id:      record?.id || null,
+        billing_status:  record?.status || 'not_generated',
+        paid_at:         record?.paid_at || null,
+        notes:           record?.notes || null,
+      };
+    });
+
+    return res.json({
+      success:       true,
+      billing_month: billingMonth,
+      month_label:   new Date(year, mo - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+      stores:        result,
+      summary: {
+        total_gmv:       result.reduce((s, r) => s + r.total_gmv, 0).toFixed(2),
+        total_fee:       result.reduce((s, r) => s + r.vayu_fee_amount, 0).toFixed(2),
+        paid_count:      result.filter(r => r.billing_status === 'paid').length,
+        unpaid_count:    result.filter(r => r.billing_status === 'unpaid').length,
+        not_generated:   result.filter(r => r.billing_status === 'not_generated').length,
+      },
+    });
+
+  } catch (error) {
+    console.error('SA billing list error:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch billing data.' });
+  }
+});
+
+// Generate billing record for a store + month
+router.post('/superadmin/billing/generate', authSuperAdmin, async (req, res) => {
+  try {
+    const { store_id, billing_month, vayu_fee_percent = 1.00 } = req.body;
+    if (!store_id || !billing_month)
+      return res.status(400).json({ error: 'store_id and billing_month required.' });
+
+    const [year, mo] = billing_month.split('-').map(Number);
+    const monthStart = new Date(year, mo - 1, 1).toISOString();
+    const monthEnd   = new Date(year, mo, 0, 23, 59, 59).toISOString();
+
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('total')
+      .eq('store_id', store_id)
+      .eq('payment_status', 'paid')
+      .gte('created_at', monthStart)
+      .lte('created_at', monthEnd);
+
+    const totalGmv    = (orders || []).reduce((s, o) => s + (o.total || 0), 0);
+    const feeAmount   = parseFloat((totalGmv * vayu_fee_percent / 100).toFixed(2));
+
+    // Upsert so re-generating updates the numbers
+    const { data: record, error } = await supabase
+      .from('store_billing')
+      .upsert({
+        store_id,
+        billing_month,
+        total_gmv:        parseFloat(totalGmv.toFixed(2)),
+        vayu_fee_percent,
+        vayu_fee_amount:  feeAmount,
+        status:           'unpaid',
+      }, { onConflict: 'store_id,billing_month' })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.json({ success: true, message: 'Billing record generated.', record });
+
+  } catch (error) {
+    console.error('Generate billing error:', error.message);
+    return res.status(500).json({ error: 'Failed to generate billing record.' });
+  }
+});
+
+// Mark billing as paid
+router.put('/superadmin/billing/:id/mark-paid', authSuperAdmin, async (req, res) => {
+  try {
+    const { notes } = req.body;
+    const { data, error } = await supabase
+      .from('store_billing')
+      .update({ status: 'paid', paid_at: new Date().toISOString(), notes: notes || null })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ success: true, message: 'Marked as paid.', record: data });
+
+  } catch (error) {
+    console.error('Mark paid error:', error.message);
+    return res.status(500).json({ error: 'Failed to mark as paid.' });
+  }
+});
+
 module.exports = router;
