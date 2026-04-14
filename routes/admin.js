@@ -1008,6 +1008,23 @@ router.get('/analytics', authAdmin, async (req, res) => {
       ai_insight:        aiInsight,
     };
 
+    // ── Suspicious sessions (today, had items, never paid) ──────────────────
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const { data: suspRaw } = await supabase
+      .from('sessions')
+      .select('id, item_count, entry_time, status, total_amount')
+      .eq('store_id', store_id)
+      .in('status', ['abandoned', 'expired'])
+      .gte('entry_time', todayStart.toISOString())
+      .gt('item_count', 0);
+
+    const suspiciousSessions = (suspRaw || []).map(s => ({
+      session_code: `#${String(s.id).padStart(4, '0')}`,
+      items:        s.item_count,
+      entry_time:   s.entry_time,
+      status:       s.status,
+    }));
+
     return res.json({
       success:        true,
       revenue_chart:  Object.entries(revenueByDay).map(([day, rev]) => ({ day, rev })),
@@ -1016,6 +1033,7 @@ router.get('/analytics', authAdmin, async (req, res) => {
       dead_stock:     deadStock,
       star_products:  starProducts,
       weekly_summary: weeklySummary,
+      suspicious_sessions: suspiciousSessions,
       monthly_summary: {
         revenue:      monthlyRevenueTotal,
         days_elapsed: daysIntoMonth,

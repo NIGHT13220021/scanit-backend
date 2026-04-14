@@ -81,31 +81,58 @@ router.post('/verify', async (req, res) => {
   const { exit_qr } = req.body;
   try {
     const result = await db.query(
-      `SELECT o.*, u.phone FROM orders o 
-       JOIN users u ON u.id = o.user_id
-       WHERE o.exit_qr_code = $1`,
+      `SELECT o.id, o.total, o.payment_status, o.exit_qr_expires,
+              o.order_number, o.session_id, o.store_id,
+              COUNT(ci.id) as item_count
+       FROM orders o
+       LEFT JOIN cart_items ci ON ci.session_id = o.session_id
+       WHERE o.exit_qr_code = $1
+       GROUP BY o.id`,
       [exit_qr]
     );
 
     if (result.rows.length === 0) {
-      return res.json({ valid: false, message: 'Invalid QR code' });
+      return res.json({
+        valid:        false,
+        flag:         true,
+        flag_reason:  'Invalid QR code — not found in system',
+        message:      'Invalid QR code'
+      });
     }
 
     const order = result.rows[0];
+    // Anonymous session code shown to guard instead of phone number
+    const session_code = `#${String(order.id).padStart(4, '0')}`;
 
     if (new Date() > new Date(order.exit_qr_expires)) {
-      return res.json({ valid: false, message: 'QR code expired' });
+      return res.json({
+        valid:        false,
+        flag:         true,
+        flag_reason:  'QR code has expired',
+        session_code,
+        message:      'QR code expired'
+      });
     }
 
     if (order.payment_status !== 'paid') {
-      return res.json({ valid: false, message: 'Payment not completed' });
+      return res.json({
+        valid:        false,
+        flag:         true,
+        flag_reason:  'Payment not completed',
+        session_code,
+        items:        parseInt(order.item_count) || 0,
+        amount:       order.total,
+        message:      'Payment not completed'
+      });
     }
 
+    // Valid — no personal details, just what staff needs
     res.json({
-      valid: true,
-      message: 'GO ✅',
-      customer_phone: order.phone,
-      amount_paid: order.total,
+      valid:        true,
+      message:      'GO',
+      session_code,
+      amount_paid:  order.total,
+      items:        parseInt(order.item_count) || 0,
       order_number: order.order_number
     });
   } catch (error) {
