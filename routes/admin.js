@@ -882,7 +882,22 @@ router.get('/analytics', authAdmin, async (req, res) => {
       starMap[name].revenue   += item.quantity * (item.store_products?.price || 0);
     });
 
-    const daysIntoMonth = new Date().getDate();
+    const daysIntoMonth  = new Date().getDate();
+    const daysInMonth    = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+    const monthlyRevenue = parseFloat(
+      Object.values(starMap).reduce((s, p) => s + p.revenue, 0).toFixed(2)
+    );
+    // starMap only captures items in order_items; also sum from the orders table directly
+    const { data: monthOrders } = await supabase
+      .from('orders')
+      .select('total')
+      .eq('store_id', store_id)
+      .eq('payment_status', 'paid')
+      .gte('created_at', monthStart.toISOString());
+    const monthlyRevenueTotal = parseFloat(
+      (monthOrders || []).reduce((s, o) => s + (o.total || 0), 0).toFixed(2)
+    );
+
     const starProducts  = Object.values(starMap)
       .sort((a, b) => b.units_sold - a.units_sold)
       .slice(0, 3)
@@ -1001,6 +1016,13 @@ router.get('/analytics', authAdmin, async (req, res) => {
       dead_stock:     deadStock,
       star_products:  starProducts,
       weekly_summary: weeklySummary,
+      monthly_summary: {
+        revenue:      monthlyRevenueTotal,
+        days_elapsed: daysIntoMonth,
+        days_in_month: daysInMonth,
+        daily_avg:    parseFloat((monthlyRevenueTotal / Math.max(daysIntoMonth, 1)).toFixed(2)),
+        month_label:  new Date().toLocaleDateString('en-IN', { month: 'long' }),
+      },
     });
 
   } catch (error) {

@@ -336,6 +336,70 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
+// ── POST /api/order/upi-pay (create + mark paid in one shot) ─
+router.post('/upi-pay', authenticate, async (req, res) => {
+  const { session_id } = req.body;
+  try {
+    const cartTotal = await db.query(
+      `SELECT SUM(ci.quantity * ci.price_at_scan) as total
+       FROM cart_items ci
+       JOIN sessions s ON s.id = ci.session_id
+       WHERE ci.session_id = $1 AND s.user_id = $2 AND s.status = 'active'`,
+      [session_id, req.user.id]
+    );
+    if (!cartTotal.rows[0].total)
+      return res.status(400).json({ error: 'Cart is empty' });
+
+    const total       = parseFloat(cartTotal.rows[0].total);
+    const orderNumber = 'ORYN-' + Date.now();
+
+    const order = await db.query(
+      `INSERT INTO orders
+         (order_number, session_id, user_id, store_id, total, subtotal, payment_status, payment_method)
+       SELECT $1, $2, $3, store_id, $4, $4, 'paid', 'upi'
+       FROM sessions WHERE id = $2
+       RETURNING *`,
+      [orderNumber, session_id, req.user.id, total]
+    );
+
+    const order_id = order.rows[0].id;
+
+    // Update session
+    const cartStats = await db.query(
+      `SELECT COUNT(*) as item_count, SUM(quantity * price_at_scan) as total
+       FROM cart_items WHERE session_id = $1`, [session_id]
+    );
+    const stats = cartStats.rows[0];
+    await db.query(
+      `UPDATE sessions
+       SET status='completed', exit_time=NOW(), payment_time=NOW(),
+           total_amount=$1, item_count=$2,
+           duration_mins=ROUND(EXTRACT(EPOCH FROM (NOW()-entry_time))/60)
+       WHERE id=$3`,
+      [stats.total || 0, stats.item_count || 0, session_id]
+    );
+
+    // Decrement stock
+    try {
+      await db.query(
+        `UPDATE store_products sp
+         SET stock_quantity = GREATEST(0, sp.stock_quantity - ci.quantity),
+             in_stock       = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0),
+             is_available   = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0)
+         FROM cart_items ci JOIN orders o ON o.session_id = ci.session_id
+         WHERE o.id=$1 AND sp.product_id=ci.product_id
+           AND sp.store_id=o.store_id AND sp.stock_quantity IS NOT NULL`,
+        [order_id]
+      );
+    } catch (e) { console.error('Stock decrement (non-fatal):', e.message); }
+
+    return res.json({ success: true, order_id, order_number: orderNumber, amount: total });
+  } catch (error) {
+    console.error('UPI pay error:', error.message);
+    return res.status(500).json({ error: 'Could not process UPI payment' });
+  }
+});
+
 // ── POST /api/order/create-upi ───────────────────────────
 router.post('/create-upi', authenticate, async (req, res) => {
   const { session_id } = req.body;
@@ -446,6 +510,113 @@ router.post('/upi-confirm', authenticate, async (req, res) => {
   }
 });
 
+// ── POST /api/order/cash-request ─────────────────────────
+// Creates a pending cash order and returns a short code for the cashier
+router.post('/cash-request', authenticate, async (req, res) => {
+  const { session_id } = req.body;
+  try {
+    const cartTotal = await db.query(
+      `SELECT SUM(ci.quantity * ci.price_at_scan) as total
+       FROM cart_items ci
+       JOIN sessions s ON s.id = ci.session_id
+       WHERE ci.session_id = $1 AND s.user_id = $2 AND s.status = 'active'`,
+      [session_id, req.user.id]
+    );
+    if (!cartTotal.rows[0].total)
+      return res.status(400).json({ error: 'Cart is empty' });
+
+    // Cancel any existing pending cash orders for this session
+    await db.query(
+      `UPDATE orders SET payment_status = 'cancelled'
+       WHERE session_id = $1 AND payment_method = 'cash' AND payment_status = 'pending'`,
+      [session_id]
+    );
+
+    const total       = parseFloat(cartTotal.rows[0].total);
+    const orderNumber = 'ORYN-' + Date.now();
+    // 4-digit numeric code, easy for cashier to read/type
+    const cashCode    = String(Math.floor(1000 + Math.random() * 9000));
+
+    const order = await db.query(
+      `INSERT INTO orders
+         (order_number, session_id, user_id, store_id, total, subtotal, payment_status, payment_method, cash_code)
+       SELECT $1, $2, $3, store_id, $4, $4, 'pending', 'cash', $5
+       FROM sessions WHERE id = $2
+       RETURNING *`,
+      [orderNumber, session_id, req.user.id, total, cashCode]
+    );
+
+    return res.json({
+      success:      true,
+      order_id:     order.rows[0].id,
+      order_number: orderNumber,
+      cash_code:    cashCode,
+      amount:       total,
+    });
+  } catch (error) {
+    console.error('Cash request error:', error.message);
+    return res.status(500).json({ error: 'Could not create cash order' });
+  }
+});
+
+// ── POST /api/order/cash-pay ──────────────────────────────
+// Marks a pending cash order as paid (after staff collects cash)
+router.post('/cash-pay', authenticate, async (req, res) => {
+  const { order_id } = req.body;
+  try {
+    const orderCheck = await db.query(
+      `SELECT * FROM orders
+       WHERE id = $1 AND user_id = $2 AND payment_method = 'cash' AND payment_status = 'pending'`,
+      [order_id, req.user.id]
+    );
+    if (orderCheck.rows.length === 0)
+      return res.status(404).json({ error: 'Order not found or already processed' });
+
+    const order      = orderCheck.rows[0];
+    const session_id = order.session_id;
+
+    await db.query(
+      `UPDATE orders SET payment_status = 'paid', cash_code = NULL WHERE id = $1`,
+      [order_id]
+    );
+
+    // Complete the session
+    const cartStats = await db.query(
+      `SELECT COUNT(*) as item_count, SUM(quantity * price_at_scan) as total
+       FROM cart_items WHERE session_id = $1`,
+      [session_id]
+    );
+    const stats = cartStats.rows[0];
+    await db.query(
+      `UPDATE sessions
+       SET status='completed', exit_time=NOW(), payment_time=NOW(),
+           total_amount=$1, item_count=$2,
+           duration_mins=ROUND(EXTRACT(EPOCH FROM (NOW()-entry_time))/60)
+       WHERE id=$3`,
+      [stats.total || 0, stats.item_count || 0, session_id]
+    );
+
+    // Decrement stock
+    try {
+      await db.query(
+        `UPDATE store_products sp
+         SET stock_quantity = GREATEST(0, sp.stock_quantity - ci.quantity),
+             in_stock       = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0),
+             is_available   = (GREATEST(0, sp.stock_quantity - ci.quantity) > 0)
+         FROM cart_items ci JOIN orders o ON o.session_id = ci.session_id
+         WHERE o.id=$1 AND sp.product_id=ci.product_id
+           AND sp.store_id=o.store_id AND sp.stock_quantity IS NOT NULL`,
+        [order_id]
+      );
+    } catch (e) { console.error('Stock decrement (non-fatal):', e.message); }
+
+    return res.json({ success: true, order_id, order_number: order.order_number, amount: order.total });
+  } catch (error) {
+    console.error('Cash pay error:', error.message);
+    return res.status(500).json({ error: 'Could not confirm cash payment' });
+  }
+});
+
 // ── Auto-fail stale pending orders (Razorpay only) ────────
 const cleanPendingOrders = async () => {
   try {
@@ -455,6 +626,13 @@ const cleanPendingOrders = async () => {
          AND (payment_method IS NULL OR payment_method = 'razorpay')
          AND razorpay_payment_id IS NULL
          AND created_at < NOW() - INTERVAL '30 minutes'`
+    );
+    // Expire stale cash orders after 15 minutes
+    await db.query(
+      `UPDATE orders SET payment_status = 'cancelled', cash_code = NULL
+       WHERE payment_status = 'pending'
+         AND payment_method = 'cash'
+         AND created_at < NOW() - INTERVAL '15 minutes'`
     );
   } catch (e) {
     console.error('Clean pending orders error:', e.message);
